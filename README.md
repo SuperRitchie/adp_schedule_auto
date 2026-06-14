@@ -132,12 +132,14 @@ Add these secrets:
 
 | Secret name | Value |
 | --- | --- |
-| `ADP_USERNAME_B64` | Base64-encoded ADP username. |
-| `ADP_PASSWORD_B64` | Base64-encoded ADP password. |
+| `ADP_USERNAME_B64` | Base64-encoded ADP username. Preferred. |
+| `ADP_PASSWORD_B64` | Base64-encoded ADP password. Preferred. |
+| `ADP_USERNAME` | Optional raw ADP username fallback if the base64 secret is not set. |
+| `ADP_PASSWORD` | Optional raw ADP password fallback if the base64 secret is not set. |
 | `GOOGLE_DRIVE_FOLDER_ID` | The destination Google Drive folder ID. |
 | `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON. |
 
-The workflow decodes the ADP base64 secrets and creates a temporary `.env` file during the run. Do not commit a real `.env` file.
+The workflow now passes credentials directly to the Node.js and Python processes through environment variables. It does **not** write ADP credentials into a temporary `.env` file during GitHub Actions. The script prefers `ADP_USERNAME_B64` / `ADP_PASSWORD_B64` when they exist, then falls back to `ADP_USERNAME` / `ADP_PASSWORD`.
 
 To encode your ADP username on macOS:
 
@@ -159,6 +161,8 @@ PY
 ```
 
 Paste the copied value into the GitHub secret `ADP_PASSWORD_B64`.
+
+The workflow prints only safe credential diagnostics, such as value length and a SHA-256 prefix. It does not print the raw password.
 
 ### Google Drive setup
 

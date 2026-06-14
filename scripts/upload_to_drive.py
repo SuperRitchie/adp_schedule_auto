@@ -19,8 +19,11 @@ so shared Drive URLs usually stay stable.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import mimetypes
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable
@@ -48,7 +51,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Upload parsed schedule files to Google Drive.")
     parser.add_argument("--source-dir", default="parsed_schedule", type=Path, help="Local folder to upload.")
     parser.add_argument("--folder-id", required=True, help="Destination Google Drive folder ID.")
-    parser.add_argument("--service-account-file", required=True, type=Path, help="Service account JSON file.")
+    parser.add_argument(
+        "--service-account-file",
+        type=Path,
+        help=(
+            "Service account JSON file. Optional when "
+            "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 is set."
+        ),
+    )
     parser.add_argument(
         "--include",
         default=".ics,.csv,.json",
@@ -66,11 +76,35 @@ def escape_drive_query_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def build_drive_service(service_account_file: Path):
+def build_drive_service(service_account_file: Path | None):
+    encoded_credentials = os.environ.get("GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64", "")
+    if encoded_credentials:
+        try:
+            decoded = base64.b64decode("".join(encoded_credentials.split()), validate=True)
+            service_account_info = json.loads(decoded.decode("utf-8"))
+        except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SystemExit(
+                "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 is set but could not be decoded "
+                "as a base64-encoded service account JSON document."
+            ) from exc
+
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=SCOPES,
+        )
+        print("Loaded Google service account credentials from GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64.")
+        return build("drive", "v3", credentials=credentials, cache_discovery=False)
+
+    if service_account_file is None:
+        raise SystemExit(
+            "Provide --service-account-file or set GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64."
+        )
+
     credentials = service_account.Credentials.from_service_account_file(
         service_account_file,
         scopes=SCOPES,
     )
+    print(f"Loaded Google service account credentials from {service_account_file}.")
     return build("drive", "v3", credentials=credentials, cache_discovery=False)
 
 

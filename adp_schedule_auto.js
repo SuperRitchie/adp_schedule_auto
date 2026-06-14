@@ -75,8 +75,44 @@ const USERNAME_LABELS = [/user\s*id/i, /username/i, /email/i, /login/i];
 const PASSWORD_LABELS = [/password/i];
 
 
+function envRaw(name, fallback = '') {
+  const value = process.env[name];
+  return value !== undefined && value !== null && value !== '' ? value : fallback;
+}
+
 function env(name, fallback = '') {
-  return process.env[name] && process.env[name].trim() !== '' ? process.env[name].trim() : fallback;
+  const value = envRaw(name, fallback);
+  return typeof value === 'string' ? value.trim() : value;
+}
+
+function decodeBase64Secret(value, label) {
+  const compact = String(value || '').replace(/\s+/g, '');
+  if (!compact) return '';
+  try {
+    return Buffer.from(compact, 'base64').toString('utf8');
+  } catch (error) {
+    throw new Error(`${label} is set but could not be decoded as base64: ${error.message}`);
+  }
+}
+
+function credentialEnv(name) {
+  // Prefer the base64 variant when present. This avoids shell/dotenv escaping
+  // problems for passwords with $, #, quotes, backslashes, spaces, etc.
+  const b64Name = `${name}_B64`;
+  const b64Value = envRaw(b64Name, '');
+  if (b64Value !== '') {
+    const decoded = decodeBase64Secret(b64Value, b64Name);
+    if (debugEnabled()) {
+      console.log(`[debug] Using ${b64Name}; decoded length: ${decoded.length}`);
+    }
+    return decoded;
+  }
+
+  const rawValue = envRaw(name, '');
+  if (rawValue !== '' && debugEnabled()) {
+    console.log(`[debug] Using raw ${name}; length: ${rawValue.length}`);
+  }
+  return rawValue;
 }
 
 function boolEnv(name, fallback = false) {
@@ -420,10 +456,10 @@ async function clickButtonLike(page, patterns, timeout = 1500) {
 }
 
 async function attemptLogin(page) {
-  const username = env('ADP_USERNAME');
-  const password = env('ADP_PASSWORD');
+  const username = credentialEnv('ADP_USERNAME');
+  const password = credentialEnv('ADP_PASSWORD');
   if (!username || !password) {
-    console.log('No ADP_USERNAME/ADP_PASSWORD in .env. Using existing browser session or manual login.');
+    console.log('No ADP credentials found in environment. Set ADP_USERNAME/ADP_PASSWORD or ADP_USERNAME_B64/ADP_PASSWORD_B64. Using existing browser session or manual login.');
     return;
   }
 
