@@ -509,43 +509,188 @@ async function navigateToTeamSchedule(page, context) {
   return page;
 }
 
-async function scrollVirtualGrid(page) {
-  console.log('Scrolling page/grid to load virtualized rows...');
-  await page.evaluate(async () => {
+async function collectVirtualGridRows(page) {
+  console.log('Collecting all rendered schedule rows while scrolling the virtualized grid...');
+
+  const result = await page.evaluate(async ({ delayMs }) => {
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const rows = new Map();
+
+    function cleanText(value) {
+      return String(value || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function getExpectedEmployeeCount() {
+      const headerText = cleanText(
+        document.querySelector('.ag-header-cell[col-id="name"]')?.textContent
+        || document.body?.innerText
+        || ''
+      );
+      const match = headerText.match(/Name\s*\[(\d+)\]/i);
+      return match ? Number(match[1]) : null;
+    }
+
+    function rowName(row) {
+      return cleanText(
+        row.querySelector('[col-id="name"] .location-schedule-employee-cell__name')?.textContent
+        || row.querySelector('[col-id="name"]')?.textContent
+        || ''
+      );
+    }
+
+    function rowSortIndex(row) {
+      const raw = row.getAttribute('row-index') || '';
+      if (raw === 't-0') return -1;
+      const parsed = Number.parseInt(raw, 10);
+      return Number.isFinite(parsed) ? parsed : 999999;
+    }
+
+    function collectVisibleRows(reason) {
+      const selector = [
+        '.ag-floating-top-container > div[role="row"]',
+        '.ag-center-cols-container > div[role="row"]'
+      ].join(', ');
+
+      for (const row of document.querySelectorAll(selector)) {
+        const name = rowName(row);
+        if (!name) continue;
+
+        const rowId = row.getAttribute('row-id') || '';
+        const rowIndex = row.getAttribute('row-index') || '';
+        const primaryJob = cleanText(row.querySelector('[col-id="primaryJob"]')?.textContent || '');
+
+        // row-id is stable for regular employee rows. The pinned My Schedule row
+        // does not always have row-id, so fall back to name/job.
+        const key = rowId ? `id:${rowId}` : `pinned:${name}:${primaryJob}`;
+        rows.set(key, {
+          key,
+          name,
+          rowId,
+          rowIndex,
+          sortIndex: rowSortIndex(row),
+          reason,
+          html: row.outerHTML,
+        });
+      }
+    }
 
     function scrollableElements() {
-      return Array.from(document.querySelectorAll('*'))
+      const preferredSelectors = [
+        '.ag-body-viewport',
+        '.ag-center-cols-viewport',
+        '.ag-body-vertical-scroll-viewport'
+      ];
+
+      const preferred = preferredSelectors
+        .flatMap(selector => Array.from(document.querySelectorAll(selector)))
+        .filter(Boolean);
+
+      const fallback = Array.from(document.querySelectorAll('*'))
         .filter(el => {
           const style = window.getComputedStyle(el);
           const canScrollY = /(auto|scroll)/.test(style.overflowY || '');
           return canScrollY && el.scrollHeight > el.clientHeight + 80;
         })
         .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
+
+      const seen = new Set();
+      return [...preferred, ...fallback].filter(el => {
+        if (!el || seen.has(el)) return false;
+        seen.add(el);
+        return el.scrollHeight > el.clientHeight + 20;
+      });
     }
 
+    const expectedEmployeeCount = getExpectedEmployeeCount();
     window.scrollTo(0, 0);
-    await sleep(300);
+    await sleep(delayMs);
+    collectVisibleRows('initial');
 
-    const candidates = [document.scrollingElement, ...scrollableElements()].filter(Boolean);
-    for (const el of candidates.slice(0, 8)) {
-      try {
-        el.scrollTop = 0;
-        await sleep(150);
-        const max = Math.max(0, el.scrollHeight - el.clientHeight);
-        const step = Math.max(250, Math.floor(el.clientHeight * 0.8));
-        for (let y = 0; y <= max + step; y += step) {
-          el.scrollTop = Math.min(y, max);
-          el.dispatchEvent(new Event('scroll', { bubbles: true }));
-          await sleep(180);
-        }
-      } catch (_) {}
+    const scrollers = scrollableElements();
+    const scroller = scrollers[0];
+
+    if (!scroller) {
+      return {
+        expectedEmployeeCount,
+        rowCount: rows.size,
+        rows: Array.from(rows.values()),
+        usedScroller: null,
+      };
     }
-  });
-  await page.waitForTimeout(1500);
+
+    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    const step = Math.max(120, Math.floor(scroller.clientHeight * 0.45));
+
+    scroller.scrollTop = 0;
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await sleep(delayMs * 2);
+    collectVisibleRows('top');
+
+    for (let y = 0; y <= max + step; y += step) {
+      scroller.scrollTop = Math.min(y, max);
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+      await sleep(delayMs);
+      collectVisibleRows(`scroll:${Math.min(y, max)}`);
+
+      // Header count does not include the pinned My Schedule row, so +1 lets
+      // us stop early once we have all employees plus the pinned row.
+      if (expectedEmployeeCount && rows.size >= expectedEmployeeCount + 1) break;
+    }
+
+    scroller.scrollTop = max;
+    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+    await sleep(delayMs);
+    collectVisibleRows('bottom');
+
+    const sortedRows = Array.from(rows.values()).sort((a, b) => {
+      if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
+      return a.name.localeCompare(b.name);
+    });
+
+    return {
+      expectedEmployeeCount,
+      rowCount: sortedRows.length,
+      rows: sortedRows,
+      usedScroller: {
+        className: scroller.className || '',
+        scrollHeight: scroller.scrollHeight,
+        clientHeight: scroller.clientHeight,
+        maxScrollTop: max,
+        step,
+      },
+    };
+  }, { delayMs: Number(env('ADP_SCROLL_DELAY_MS', '250')) });
+
+  console.log(`Collected ${result.rowCount} rendered schedule rows${result.expectedEmployeeCount ? `; header expects ${result.expectedEmployeeCount}` : ''}.`);
+  if (result.expectedEmployeeCount && result.rowCount < result.expectedEmployeeCount) {
+    console.warn(`WARNING: collected ${result.rowCount} rows, but the header expects ${result.expectedEmployeeCount}. Try increasing ADP_SCROLL_DELAY_MS.`);
+  }
+
+  await page.waitForTimeout(1000);
+  return result;
 }
 
-async function saveCapture(page, outputDir) {
+function injectCapturedVirtualRows(html, virtualGridCapture) {
+  if (!virtualGridCapture || !Array.isArray(virtualGridCapture.rows) || virtualGridCapture.rows.length === 0) {
+    return html;
+  }
+
+  const rowHtml = virtualGridCapture.rows.map(row => row.html).join('\n');
+  const block = `
+<!-- ADP_SCHEDULE_CAPTURED_VIRTUAL_ROWS_START -->
+<div id="adp-schedule-captured-virtual-rows" class="ag-center-cols-container" data-captured-row-count="${virtualGridCapture.rowCount}">
+${rowHtml}
+</div>
+<!-- ADP_SCHEDULE_CAPTURED_VIRTUAL_ROWS_END -->
+`;
+
+  if (/<\/body>/i.test(html)) {
+    return html.replace(/<\/body>/i, `${block}</body>`);
+  }
+  return `${html}${block}`;
+}
+
+async function saveCapture(page, outputDir, virtualGridCapture = null) {
   await fs.mkdir(outputDir, { recursive: true });
   const stamp = timestamp();
   const htmlPath = path.join(outputDir, `schedule_${stamp}.html`);
@@ -555,7 +700,8 @@ async function saveCapture(page, outputDir) {
   const screenshotPath = path.join(outputDir, `schedule_${stamp}.png`);
   const metadataPath = path.join(outputDir, `schedule_${stamp}.metadata.json`);
 
-  const html = await page.content();
+  const rawHtml = await page.content();
+  const html = injectCapturedVirtualRows(rawHtml, virtualGridCapture);
   const visibleText = await getVisibleText(page);
   await fs.writeFile(htmlPath, html, 'utf8');
   await fs.writeFile(latestPath, html, 'utf8');
@@ -570,7 +716,13 @@ async function saveCapture(page, outputDir) {
     html_file: htmlPath,
     latest_html_file: latestPath,
     visible_text_file: textPath,
-    screenshot_file: await fileExists(screenshotPath) ? screenshotPath : null
+    screenshot_file: await fileExists(screenshotPath) ? screenshotPath : null,
+    virtual_grid_capture: virtualGridCapture ? {
+      expected_employee_count: virtualGridCapture.expectedEmployeeCount,
+      captured_row_count: virtualGridCapture.rowCount,
+      used_scroller: virtualGridCapture.usedScroller,
+      captured_names_preview: virtualGridCapture.rows.slice(0, 8).map(row => row.name),
+    } : null
   };
   await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
   return { htmlPath, latestPath, textPath, screenshotPath, metadataPath };
@@ -649,8 +801,8 @@ async function main() {
     await waitForAuthToSettle(page);
     page = await navigateToWorkFeaturesPage(page);
     page = await navigateToTeamSchedule(page, context);
-    await scrollVirtualGrid(page);
-    const saved = await saveCapture(page, outputDir);
+    const virtualGridCapture = await collectVirtualGridRows(page);
+    const saved = await saveCapture(page, outputDir, virtualGridCapture);
     await runParser(saved.latestPath, parsedOutDir);
 
     console.log('\nDone. Key files:');

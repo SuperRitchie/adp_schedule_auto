@@ -202,11 +202,12 @@ def iter_schedule_rows(soup: BeautifulSoup) -> Iterable[Tag]:
     has the actual rendered team rows. The floating top container usually has 'My Schedule'.
     """
     for selector in (".ag-floating-top-container", ".ag-center-cols-container"):
-        container = soup.select_one(selector)
-        if not container:
-            continue
-        for row in container.select(':scope > div[role="row"]'):
-            yield row
+        # Use select() rather than select_one(). The Playwright capturer may
+        # append an extra synthetic .ag-center-cols-container containing rows
+        # collected across every scroll position in the virtualized grid.
+        for container in soup.select(selector):
+            for row in container.select(':scope > div[role="row"]'):
+                yield row
 
 
 def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
