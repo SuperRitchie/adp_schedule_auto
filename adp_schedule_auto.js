@@ -458,6 +458,9 @@ async function clickButtonLike(page, patterns, timeout = 1500) {
 async function attemptLogin(page) {
   const username = credentialEnv('ADP_USERNAME');
   const password = credentialEnv('ADP_PASSWORD');
+  console.log('The below should be the values that are inputted');
+  console.log(username);
+  console.log(password);
   if (!username || !password) {
     console.log('No ADP credentials found in environment. Set ADP_USERNAME/ADP_PASSWORD or ADP_USERNAME_B64/ADP_PASSWORD_B64. Using existing browser session or manual login.');
     return;
