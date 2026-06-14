@@ -46,19 +46,41 @@ jobs:
       - name: Create .env for this run safely
         shell: bash
         env:
-          ADP_USERNAME_SECRET: ${{ secrets.ADP_USERNAME }}
-          ADP_PASSWORD_SECRET: ${{ secrets.ADP_PASSWORD }}
+          ADP_USERNAME_B64_SECRET: ${{ secrets.ADP_USERNAME_B64 }}
+          ADP_PASSWORD_B64_SECRET: ${{ secrets.ADP_PASSWORD_B64 }}
         run: |
           python3 - <<'PY'
+          import base64
+          import binascii
           import json
           import os
           from pathlib import Path
 
+          def decode_required_b64(env_name: str) -> str:
+              raw = os.environ.get(env_name, "")
+              if not raw:
+                  raise SystemExit(f"Missing required GitHub secret: {env_name.replace('_SECRET', '')}")
+
+              # Allow copy/pasted base64 with line wrapping or spaces.
+              compact = "".join(raw.split())
+              try:
+                  decoded = base64.b64decode(compact, validate=True)
+              except binascii.Error as exc:
+                  raise SystemExit(f"{env_name.replace('_SECRET', '')} is not valid base64: {exc}") from exc
+
+              try:
+                  return decoded.decode("utf-8")
+              except UnicodeDecodeError as exc:
+                  raise SystemExit(f"{env_name.replace('_SECRET', '')} did not decode as UTF-8 text") from exc
+
+          adp_username = decode_required_b64("ADP_USERNAME_B64_SECRET")
+          adp_password = decode_required_b64("ADP_PASSWORD_B64_SECRET")
+
           values = {
               "ADP_URL": "https://my.adp.com/#/time",
               "ADP_WORK_FEATURES_URL": "https://my.adp.com/#/time/myworkfeatures",
-              "ADP_USERNAME": os.environ["ADP_USERNAME_SECRET"],
-              "ADP_PASSWORD": os.environ["ADP_PASSWORD_SECRET"],
+              "ADP_USERNAME": adp_username,
+              "ADP_PASSWORD": adp_password,
               "ADP_HEADLESS": "true",
               "ADP_INCOGNITO": "true",
               "ADP_SELECT_ALL_JOBS": "true",
@@ -82,11 +104,11 @@ jobs:
           lines = [f"{key}={dotenv_quote(value)}" for key, value in values.items()]
           Path(".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-          print("Created .env safely with quoted dotenv values.")
-          print("ADP_USERNAME present:", bool(values["ADP_USERNAME"]))
-          print("ADP_PASSWORD present:", bool(values["ADP_PASSWORD"]))
-          print("ADP_USERNAME length:", len(values["ADP_USERNAME"]))
-          print("ADP_PASSWORD length:", len(values["ADP_PASSWORD"]))
+          print("Created .env safely from base64-encoded GitHub secrets.")
+          print("ADP_USERNAME_B64 present:", bool(os.environ.get("ADP_USERNAME_B64_SECRET")))
+          print("ADP_PASSWORD_B64 present:", bool(os.environ.get("ADP_PASSWORD_B64_SECRET")))
+          print("Decoded ADP_USERNAME length:", len(values["ADP_USERNAME"]))
+          print("Decoded ADP_PASSWORD length:", len(values["ADP_PASSWORD"]))
           PY
 
       - name: Capture and parse schedules

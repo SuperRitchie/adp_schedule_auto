@@ -132,12 +132,33 @@ Add these secrets:
 
 | Secret name | Value |
 | --- | --- |
-| `ADP_USERNAME` | Your ADP username. |
-| `ADP_PASSWORD` | Your ADP password. |
+| `ADP_USERNAME_B64` | Base64-encoded ADP username. |
+| `ADP_PASSWORD_B64` | Base64-encoded ADP password. |
 | `GOOGLE_DRIVE_FOLDER_ID` | The destination Google Drive folder ID. |
 | `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON. |
 
-The workflow creates a temporary `.env` file during the run. Do not commit a real `.env` file.
+The workflow decodes the ADP base64 secrets and creates a temporary `.env` file during the run. Do not commit a real `.env` file.
+
+To encode your ADP username on macOS:
+
+```bash
+printf '%s' 'your_adp_username' | base64 | tr -d '\n' | pbcopy
+```
+
+Paste the copied value into the GitHub secret `ADP_USERNAME_B64`.
+
+To encode your ADP password without the shell touching special characters:
+
+```bash
+python3 - <<'PY' | pbcopy
+import base64
+import getpass
+password = getpass.getpass('ADP password: ')
+print(base64.b64encode(password.encode('utf-8')).decode('ascii'), end='')
+PY
+```
+
+Paste the copied value into the GitHub secret `ADP_PASSWORD_B64`.
 
 ### Google Drive setup
 
