@@ -1,0 +1,94 @@
+name: Capture ADP schedule and upload to Google Drive
+
+on:
+  workflow_dispatch:
+  schedule:
+    # GitHub schedules run in UTC. This is 5:17 AM Vancouver during daylight time.
+    - cron: "17 12 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: adp-schedule-capture
+  cancel-in-progress: false
+
+jobs:
+  capture-and-upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Python dependencies
+        run: python3 -m pip install -r requirements.txt
+
+      - name: Create .env for this run
+        shell: bash
+        run: |
+          cat > .env <<'EOF'
+          ADP_URL=https://my.adp.com/#/time
+          ADP_WORK_FEATURES_URL=https://my.adp.com/#/time/myworkfeatures
+          ADP_USERNAME=${{ secrets.ADP_USERNAME }}
+          ADP_PASSWORD=${{ secrets.ADP_PASSWORD }}
+          ADP_HEADLESS=true
+          ADP_INCOGNITO=true
+          ADP_SELECT_ALL_JOBS=true
+          ADP_FILTER_DELAY_MS=700
+          ADP_WEEKS_TO_CAPTURE=4
+          ADP_SCROLL_DELAY_MS=500
+          ADP_NEXT_WEEK_DELAY_MS=1500
+          ADP_NEXT_WEEK_TIMEOUT_MS=45000
+          CALENDAR_TIMEZONE=America/Vancouver
+          CALENDAR_ALARMS=1440,180,60
+          EOF
+
+      - name: Capture and parse schedules
+        run: node adp_schedule_auto.js
+
+      - name: Decode Google service account credentials
+        shell: bash
+        run: |
+          mkdir -p .secrets
+          printf '%s' '${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 }}' | base64 --decode > .secrets/google-service-account.json
+
+      - name: Upload parsed schedule outputs to Google Drive
+        env:
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+        run: |
+          python3 scripts/upload_to_drive.py \
+            --source-dir parsed_schedule \
+            --folder-id "$GOOGLE_DRIVE_FOLDER_ID" \
+            --service-account-file .secrets/google-service-account.json
+
+      - name: Upload debug artifacts if the run fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adp-debug-artifacts
+          path: |
+            captures/*.metadata.json
+            captures/latest_visible_text.txt
+            parsed_schedule/parse_summary.json
+          if-no-files-found: ignore
+          retention-days: 3

@@ -119,3 +119,47 @@ Keep `.auth/` private because it can contain login session cookies.
 The Team Schedule grid is virtualized. That means saved HTML may only contain rows that were rendered while scrolling. The script tries to scroll the main page and the largest scrollable grid containers before saving. If the summary says the header employee count is larger than the rendered count, we may need a better grid-specific scrolling selector or an export/print view.
 
 For GitHub Actions, this will only work if ADP allows non-interactive login with your account and does not require MFA/security checkpoint. Be careful with employee schedule data and do not put this into a public repo.
+
+## GitHub Actions + Google Drive upload
+
+This repo includes a workflow at `.github/workflows/capture-schedule.yml` that can run the ADP schedule capture automatically, parse the schedules, and upload the generated files in `parsed_schedule/` to Google Drive.
+
+### Required GitHub secrets
+
+Go to your GitHub repository, then **Settings → Secrets and variables → Actions → New repository secret**.
+
+Add these secrets:
+
+| Secret name | Value |
+| --- | --- |
+| `ADP_USERNAME` | Your ADP username. |
+| `ADP_PASSWORD` | Your ADP password. |
+| `GOOGLE_DRIVE_FOLDER_ID` | The destination Google Drive folder ID. |
+| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON. |
+
+The workflow creates a temporary `.env` file during the run. Do not commit a real `.env` file.
+
+### Google Drive setup
+
+1. Create a Google Cloud project.
+2. Enable the Google Drive API.
+3. Create a service account.
+4. Create/download a JSON key for that service account.
+5. Share your destination Google Drive folder with the service account email, usually something like `name@project-id.iam.gserviceaccount.com`.
+6. Base64 encode the JSON file and save it as the GitHub secret `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64`.
+
+On macOS:
+
+```bash
+base64 -i service-account.json | pbcopy
+```
+
+Paste the copied value into the GitHub secret.
+
+### Manual workflow run
+
+After committing and pushing the workflow file, go to the repo's **Actions** tab, select **Capture ADP schedule and upload to Google Drive**, then click **Run workflow**.
+
+### Important MFA note
+
+The workflow runs headless. If ADP requires MFA every time, GitHub Actions cannot complete that step automatically. In that case, either run the script locally, use a self-hosted runner where you can complete MFA, or keep using the local browser flow.
