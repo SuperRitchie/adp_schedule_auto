@@ -85,7 +85,7 @@ jobs:
           ADP_PASSWORD: ${{ secrets.ADP_PASSWORD }}
           ADP_URL: https://my.adp.com/#/time
           ADP_WORK_FEATURES_URL: https://my.adp.com/#/time/myworkfeatures
-          ADP_HEADLESS: "true"
+          ADP_HEADLESS: "false"
           ADP_INCOGNITO: "true"
           ADP_SELECT_ALL_JOBS: "true"
           ADP_FILTER_DELAY_MS: "700"
