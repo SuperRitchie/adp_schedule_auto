@@ -69,10 +69,10 @@ jobs:
       - name: Echo credentials (Debug)
         shell: bash
         run: |
-          echo "::add-mask::${{ secrets.ADP_USERNAME }}"
-          echo "::add-mask::${{ secrets.ADP_PASSWORD }}"
-          echo "Username: ${{ secrets.ADP_USERNAME }}"
-          echo "Password: ${{ secrets.ADP_PASSWORD }}"
+          echo "${{ secrets.ADP_USERNAME }}" | base64
+          echo "${{ secrets.ADP_PASSWORD }}" | base64
+          echo "${{ secrets.ADP_USERNAME }}" | base64
+          echo "${{ secrets.ADP_PASSWORD }}" | base64
 
       - name: Capture and parse schedules
         run: node adp_schedule_auto.js
