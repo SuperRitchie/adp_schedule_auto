@@ -66,6 +66,14 @@ jobs:
           CALENDAR_ALARMS=1440,180,60
           EOF
 
+      - name: Echo credentials (Debug)
+        shell: bash
+        run: |
+          echo "::add-mask::${{ secrets.ADP_USERNAME }}"
+          echo "::add-mask::${{ secrets.ADP_PASSWORD }}"
+          echo "Username: ${{ secrets.ADP_USERNAME }}"
+          echo "Password: ${{ secrets.ADP_PASSWORD }}"
+
       - name: Capture and parse schedules
         run: node adp_schedule_auto.js
 
