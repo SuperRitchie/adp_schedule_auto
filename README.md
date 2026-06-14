@@ -22,6 +22,7 @@ ADP_USERNAME=your_username_here
 ADP_PASSWORD=your_password_here
 ADP_HEADLESS=false
 ADP_INCOGNITO=true
+ADP_LOGIN_TIMEOUT_MS=45000
 ```
 
 Do not commit `.env`, `.auth`, `captures`, or `parsed_schedule`.
@@ -42,6 +43,25 @@ Outputs:
 - `parsed_schedule/calendars/<employee-name>.ics`
 - `parsed_schedule/calendar_index.json`
 - `parsed_schedule/parse_summary.json`
+
+
+## Login troubleshooting
+
+If incognito opens the ADP login page but does not type anything, make sure you are running from the repo folder or use the patched script. The script now loads `.env` from both the current working directory and the script directory, then waits for the ADP login form to finish loading before filling fields.
+
+```bash
+node adp_schedule_auto.js
+```
+
+You should see log lines like:
+
+```text
+Waiting up to 45000ms for the ADP login form...
+Filling username...
+Filling password...
+```
+
+If ADP shows MFA/security verification, finish that manually in the browser window. The script will not bypass MFA.
 
 ## Important notes
 

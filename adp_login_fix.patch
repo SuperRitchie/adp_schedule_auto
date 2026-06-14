@@ -1,0 +1,316 @@
+diff --git a/.env.example b/.env.example
+new file mode 100644
+index 0000000..61da80c
+--- /dev/null
++++ b/.env.example
+@@ -0,0 +1,30 @@
++# Start here. Copy this file to .env and fill in values locally.
++# Do not commit .env, .auth, captures, or parsed_schedule.
++
++ADP_URL=https://my.adp.com/#/time
++ADP_USERNAME=your_username_here
++ADP_PASSWORD=your_password_here
++
++# Leave false while developing. Headless usually only works after the session is already trusted.
++ADP_HEADLESS=false
++
++# true = temporary incognito browser context. No cookies/session saved after the run.
++# false = persistent local profile in ADP_PROFILE_DIR, which may stay logged in between runs.
++ADP_INCOGNITO=true
++
++# How long to wait for the ADP login form to appear after redirects/JS load.
++ADP_LOGIN_TIMEOUT_MS=45000
++
++# Optional. If clicking the tile is unreliable, paste the final Team Schedule URL here after one manual run.
++TEAM_SCHEDULE_URL=
++TEAM_SCHEDULE_TEXT=Team Schedule
++
++# Where local browser session/cookies and outputs are stored.
++ADP_PROFILE_DIR=.auth/adp-browser-profile
++OUTPUT_DIR=captures
++PARSED_OUT_DIR=parsed_schedule
++
++# Calendar settings used by the parser for generated employee ICS files.
++CALENDAR_TIMEZONE=America/Vancouver
++CALENDAR_LOCATION=
++CALENDAR_ALARMS=1440,180,60
+diff --git a/README.md b/README.md
+index 9f87b57..8e9987f 100644
+--- a/README.md
++++ b/README.md
+@@ -22,6 +22,7 @@ ADP_USERNAME=your_username_here
+ ADP_PASSWORD=your_password_here
+ ADP_HEADLESS=false
+ ADP_INCOGNITO=true
++ADP_LOGIN_TIMEOUT_MS=45000
+ ```
+ 
+ Do not commit `.env`, `.auth`, `captures`, or `parsed_schedule`.
+@@ -43,6 +44,25 @@ Outputs:
+ - `parsed_schedule/calendar_index.json`
+ - `parsed_schedule/parse_summary.json`
+ 
++
++## Login troubleshooting
++
++If incognito opens the ADP login page but does not type anything, make sure you are running from the repo folder or use the patched script. The script now loads `.env` from both the current working directory and the script directory, then waits for the ADP login form to finish loading before filling fields.
++
++```bash
++node adp_schedule_auto.js
++```
++
++You should see log lines like:
++
++```text
++Waiting up to 45000ms for the ADP login form...
++Filling username...
++Filling password...
++```
++
++If ADP shows MFA/security verification, finish that manually in the browser window. The script will not bypass MFA.
++
+ ## Important notes
+ 
+ The trace you uploaded reached the MyADP Time landing page where the **Go to Team Schedule** button is visible. This script starts from that same place and clicks **Team Schedule** automatically.
+diff --git a/adp_schedule_auto.js b/adp_schedule_auto.js
+index aa8b49b..67d4af1 100755
+--- a/adp_schedule_auto.js
++++ b/adp_schedule_auto.js
+@@ -14,15 +14,66 @@
+   It does not bypass MFA and it does not ask you to paste credentials into chat.
+ */
+ 
++const fsSync = require('fs');
+ const fs = require('fs/promises');
+ const path = require('path');
+ const readline = require('readline');
+ const { spawn } = require('child_process');
+ const { chromium } = require('playwright');
+-require('dotenv').config();
++const dotenv = require('dotenv');
++
++loadEnvFiles();
+ 
+ const DEFAULT_START_URL = 'https://my.adp.com/#/time';
+ 
++function loadEnvFiles() {
++  // dotenv normally reads from the current working directory only. That breaks
++  // when you run `node path/to/adp_schedule_auto.js` from outside the repo.
++  // Load both locations without overriding values that are already set.
++  const candidates = [
++    path.resolve(__dirname, '.env'),
++    path.resolve(process.cwd(), '.env')
++  ];
++  const seen = new Set();
++
++  for (const envPath of candidates) {
++    if (seen.has(envPath)) continue;
++    seen.add(envPath);
++    if (!fsSync.existsSync(envPath)) continue;
++    dotenv.config({ path: envPath, override: false });
++    console.log(`Loaded environment variables from ${envPath}`);
++  }
++}
++
++const USERNAME_SELECTORS = [
++  'input[autocomplete="username"]',
++  'input[aria-label*="user" i]',
++  'input[placeholder*="user" i]',
++  'input[name*="user" i]',
++  'input[id*="user" i]',
++  'input[name*="login" i]',
++  'input[id*="login" i]',
++  'input[type="email"]',
++  'input[aria-label*="email" i]',
++  'input[placeholder*="email" i]',
++  'input[name*="email" i]',
++  'input[id*="email" i]',
++  'input[type="text"]'
++];
++
++const PASSWORD_SELECTORS = [
++  'input[autocomplete="current-password"]',
++  'input[type="password"]',
++  'input[aria-label*="password" i]',
++  'input[placeholder*="password" i]',
++  'input[name*="password" i]',
++  'input[id*="password" i]'
++];
++
++const USERNAME_LABELS = [/user\s*id/i, /username/i, /email/i, /login/i];
++const PASSWORD_LABELS = [/password/i];
++
++
+ function env(name, fallback = '') {
+   return process.env[name] && process.env[name].trim() !== '' ? process.env[name].trim() : fallback;
+ }
+@@ -67,16 +118,82 @@ async function locatorVisible(locator, timeout = 750) {
+   }
+ }
+ 
+-async function firstVisibleInput(page, selectors) {
++async function firstVisibleInput(page, selectors, timeout = 750) {
+   for (const frame of page.frames()) {
+     for (const selector of selectors) {
+       const locator = frame.locator(selector).first();
+-      if (await locatorVisible(locator)) return locator;
++      if (await locatorVisible(locator, timeout)) return locator;
++    }
++  }
++  return null;
++}
++
++async function firstVisibleInputByLabel(page, labels, timeout = 750) {
++  for (const frame of page.frames()) {
++    for (const label of labels) {
++      const locator = frame.getByLabel(label).first();
++      if (await locatorVisible(locator, timeout)) return locator;
+     }
+   }
+   return null;
+ }
+ 
++async function findUsernameInput(page, timeout = 750) {
++  return await firstVisibleInputByLabel(page, USERNAME_LABELS, timeout)
++    || await firstVisibleInput(page, USERNAME_SELECTORS, timeout);
++}
++
++async function findPasswordInput(page, timeout = 750) {
++  return await firstVisibleInputByLabel(page, PASSWORD_LABELS, timeout)
++    || await firstVisibleInput(page, PASSWORD_SELECTORS, timeout);
++}
++
++async function waitForLocator(findFn, timeoutMs, description) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    const locator = await findFn();
++    if (locator) return locator;
++    await new Promise(resolve => setTimeout(resolve, 500));
++  }
++  console.log(`Timed out waiting for ${description}.`);
++  return null;
++}
++
++async function fillInput(locator, value, label) {
++  console.log(`Filling ${label}...`);
++  await locator.click({ timeout: 5_000 }).catch(() => {});
++  await locator.fill(value, { timeout: 5_000 });
++
++  // Some login widgets ignore a fast fill until the field is focused/keyed.
++  // If the value did not stick, retry using key events.
++  const currentValue = await locator.inputValue({ timeout: 2_000 }).catch(() => '');
++  if (currentValue !== value) {
++    await locator.fill('', { timeout: 5_000 }).catch(() => {});
++    await locator.pressSequentially(value, { delay: 15, timeout: 10_000 });
++  }
++}
++
++async function isLikelyLoggedIn(page) {
++  const [text, title] = await Promise.all([
++    getVisibleText(page),
++    page.title().catch(() => '')
++  ]);
++  return /Team Schedule|My Calendar|My Timecard|Time - MyADP|Go to Team Schedule/i.test(text)
++    || /Time - MyADP/i.test(title);
++}
++
++async function waitForLoginFormOrLoggedIn(page, timeoutMs) {
++  const start = Date.now();
++  while (Date.now() - start < timeoutMs) {
++    if (await isLikelyLoggedIn(page)) return 'logged-in';
++    const userInput = await findUsernameInput(page, 250);
++    const passInput = await findPasswordInput(page, 250);
++    if (userInput || passInput) return 'login-form';
++    await page.waitForTimeout(500);
++  }
++  return 'unknown';
++}
++
+ async function clickButtonLike(page, patterns, timeout = 1500) {
+   for (const frame of page.frames()) {
+     for (const pattern of patterns) {
+@@ -120,40 +237,57 @@ async function attemptLogin(page) {
+     return;
+   }
+ 
+-  const usernameSelectors = [
+-    'input[autocomplete="username"]',
+-    'input[type="email"]',
+-    'input[name*="user" i]',
+-    'input[id*="user" i]',
+-    'input[name*="login" i]',
+-    'input[id*="login" i]',
+-    'input[name*="email" i]',
+-    'input[id*="email" i]',
+-    'input[type="text"]'
+-  ];
++  const loginTimeoutMs = Number(env('ADP_LOGIN_TIMEOUT_MS', '45000'));
++  console.log(`Waiting up to ${loginTimeoutMs}ms for the ADP login form...`);
+ 
+-  const passwordSelectors = [
+-    'input[autocomplete="current-password"]',
+-    'input[type="password"]',
+-    'input[name*="password" i]',
+-    'input[id*="password" i]'
+-  ];
++  const loginState = await waitForLoginFormOrLoggedIn(page, loginTimeoutMs);
++  if (loginState === 'logged-in') {
++    console.log('Already past the login screen. Continuing.');
++    return;
++  }
++
++  if (loginState === 'unknown') {
++    console.log('Could not find a login form automatically. Leaving the browser open for manual login if needed.');
++    return;
++  }
++
++  let userInput = await findUsernameInput(page, 1500);
++  let passInput = await findPasswordInput(page, 1500);
+ 
+-  const userInput = await firstVisibleInput(page, usernameSelectors);
+   if (userInput) {
+-    console.log('Login form detected. Filling username...');
+-    await userInput.fill(username);
+-    await clickButtonLike(page, [/next/i, /continue/i, /sign in/i, /log in/i, /login/i], 800).catch(() => false);
+-    await page.waitForTimeout(1500);
++    await fillInput(userInput, username, 'username');
++  } else {
++    console.log('Username field was not visible. ADP may have remembered the username or moved to a password-only step.');
++  }
++
++  // ADP often shows username and password on the same screen. Fill password
++  // before clicking Sign in. If the screen is a two-step login, click Next and
++  // then wait for the password field.
++  passInput = await findPasswordInput(page, 1500);
++  if (!passInput && userInput) {
++    const clickedNext = await clickButtonLike(page, [/next/i, /continue/i], 1000).catch(() => false);
++    if (clickedNext) {
++      await page.waitForTimeout(1500);
++      passInput = await waitForLocator(() => findPasswordInput(page, 750), 30_000, 'password field');
++    }
+   }
+ 
+-  const passInput = await firstVisibleInput(page, passwordSelectors);
+   if (passInput) {
+-    console.log('Filling password...');
+-    await passInput.fill(password);
+-    await clickButtonLike(page, [/sign in/i, /log in/i, /login/i, /continue/i, /submit/i], 800).catch(() => false);
+-    await page.waitForTimeout(3000);
++    await fillInput(passInput, password, 'password');
++  } else {
++    console.log('Password field was not visible. Complete the remaining login step manually in the browser.');
++    return;
++  }
++
++  const clickedSignIn = await clickButtonLike(page, [/sign in/i, /log in/i, /login/i, /submit/i, /continue/i], 1500).catch(() => false);
++  if (!clickedSignIn) {
++    console.log('Could not click the Sign in button automatically. Press it manually in the browser.');
++    return;
+   }
++
++  await page.waitForLoadState('domcontentloaded', { timeout: 30_000 }).catch(() => {});
++  await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
++  await page.waitForTimeout(3000);
+ }
+ 
+ async function waitUntilTimeLandingOrLoggedIn(page) {
