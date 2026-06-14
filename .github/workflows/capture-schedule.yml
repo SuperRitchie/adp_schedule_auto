@@ -43,45 +43,70 @@ jobs:
       - name: Install Python dependencies
         run: python3 -m pip install -r requirements.txt
 
-      - name: Create .env for this run
+      - name: Create .env for this run safely
         shell: bash
+        env:
+          ADP_USERNAME_SECRET: ${{ secrets.ADP_USERNAME }}
+          ADP_PASSWORD_SECRET: ${{ secrets.ADP_PASSWORD }}
         run: |
-          cat > .env <<'EOF'
-          ADP_URL=https://my.adp.com/#/time
-          ADP_WORK_FEATURES_URL=https://my.adp.com/#/time/myworkfeatures
-          ADP_USERNAME=${{ secrets.ADP_USERNAME }}
-          ADP_PASSWORD=${{ secrets.ADP_PASSWORD }}
-          ADP_HEADLESS=true
-          ADP_INCOGNITO=true
-          ADP_SELECT_ALL_JOBS=true
-          ADP_FILTER_DELAY_MS=700
-          ADP_WEEKS_TO_CAPTURE=4
-          ADP_SCROLL_DELAY_MS=500
-          ADP_NEXT_WEEK_DELAY_MS=1500
-          ADP_NEXT_WEEK_TIMEOUT_MS=45000
-          ADP_POST_LOGIN_TIMEOUT_MS=120000
-          ADP_DEBUG=true
-          ADP_TRACE=true
-          CALENDAR_TIMEZONE=America/Vancouver
-          CALENDAR_ALARMS=1440,180,60
-          EOF
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
 
-      - name: Echo credentials (Debug)
-        shell: bash
-        run: |
-          echo "${{ secrets.ADP_USERNAME }}" | base64
-          echo "${{ secrets.ADP_PASSWORD }}" | base64
-          echo "${{ secrets.ADP_USERNAME }}" | base64
-          echo "${{ secrets.ADP_PASSWORD }}" | base64
+          values = {
+              "ADP_URL": "https://my.adp.com/#/time",
+              "ADP_WORK_FEATURES_URL": "https://my.adp.com/#/time/myworkfeatures",
+              "ADP_USERNAME": os.environ["ADP_USERNAME_SECRET"],
+              "ADP_PASSWORD": os.environ["ADP_PASSWORD_SECRET"],
+              "ADP_HEADLESS": "true",
+              "ADP_INCOGNITO": "true",
+              "ADP_SELECT_ALL_JOBS": "true",
+              "ADP_FILTER_DELAY_MS": "700",
+              "ADP_WEEKS_TO_CAPTURE": "4",
+              "ADP_SCROLL_DELAY_MS": "500",
+              "ADP_NEXT_WEEK_DELAY_MS": "1500",
+              "ADP_NEXT_WEEK_TIMEOUT_MS": "45000",
+              "ADP_POST_LOGIN_TIMEOUT_MS": "120000",
+              "ADP_DEBUG": "true",
+              "ADP_TRACE": "true",
+              "CALENDAR_TIMEZONE": "America/Vancouver",
+              "CALENDAR_ALARMS": "1440,180,60",
+          }
+
+          def dotenv_quote(value: str) -> str:
+              # dotenv supports double-quoted values. JSON escaping safely preserves
+              # $, #, quotes, backslashes, spaces, and other shell-sensitive chars.
+              return json.dumps(str(value))
+
+          lines = [f"{key}={dotenv_quote(value)}" for key, value in values.items()]
+          Path(".env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+          print("Created .env safely with quoted dotenv values.")
+          print("ADP_USERNAME present:", bool(values["ADP_USERNAME"]))
+          print("ADP_PASSWORD present:", bool(values["ADP_PASSWORD"]))
+          print("ADP_USERNAME length:", len(values["ADP_USERNAME"]))
+          print("ADP_PASSWORD length:", len(values["ADP_PASSWORD"]))
+          PY
 
       - name: Capture and parse schedules
         run: node adp_schedule_auto.js
 
       - name: Decode Google service account credentials
         shell: bash
+        env:
+          GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
           mkdir -p .secrets
-          printf '%s' '${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 }}' | base64 --decode > .secrets/google-service-account.json
+          python3 - <<'PY'
+          import base64
+          import os
+          from pathlib import Path
+
+          encoded = os.environ["GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64"]
+          Path(".secrets/google-service-account.json").write_bytes(base64.b64decode(encoded))
+          print("Decoded Google service account credentials.")
+          PY
 
       - name: Upload parsed schedule outputs to Google Drive
         env:
