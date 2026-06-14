@@ -40,6 +40,11 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      - name: Install Xvfb for headed Chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb
+
       - name: Install Python dependencies
         run: python3 -m pip install -r requirements.txt
 
@@ -85,8 +90,15 @@ jobs:
           ADP_PASSWORD: ${{ secrets.ADP_PASSWORD }}
           ADP_URL: https://my.adp.com/#/time
           ADP_WORK_FEATURES_URL: https://my.adp.com/#/time/myworkfeatures
+          # Keep this matching the local successful run. A headed browser
+          # needs xvfb-run on GitHub Actions because there is no real display.
           ADP_HEADLESS: "false"
           ADP_INCOGNITO: "true"
+          TZ: America/Vancouver
+          ADP_TIMEZONE_ID: America/Vancouver
+          ADP_LOCALE: en-CA
+          ADP_WINDOW_WIDTH: "1600"
+          ADP_WINDOW_HEIGHT: "1000"
           ADP_SELECT_ALL_JOBS: "true"
           ADP_FILTER_DELAY_MS: "700"
           ADP_WEEKS_TO_CAPTURE: "4"
@@ -98,7 +110,14 @@ jobs:
           ADP_TRACE: "true"
           CALENDAR_TIMEZONE: America/Vancouver
           CALENDAR_ALARMS: 1440,180,60
-        run: node adp_schedule_auto.js
+        run: |
+          if [ "${ADP_HEADLESS}" = "false" ]; then
+            echo "Running headed Chromium under xvfb-run to match local headed/incognito conditions."
+            xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
+          else
+            echo "Running headless Chromium."
+            node adp_schedule_auto.js
+          fi
 
       - name: Upload parsed schedule outputs to Google Drive
         env:

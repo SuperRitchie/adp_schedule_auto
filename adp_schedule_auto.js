@@ -120,6 +120,11 @@ function boolEnv(name, fallback = false) {
   return ['1', 'true', 'yes', 'y'].includes(value);
 }
 
+function numberEnv(name, fallback) {
+  const parsed = Number.parseInt(env(name, String(fallback)), 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
@@ -1047,15 +1052,32 @@ async function main() {
   console.log(`Parsed out dir:${parsedOutDir}`);
   console.log('\nKeep .env, .auth, captures, and parsed_schedule private. They can contain credentials/cookies or employee schedule data.\n');
 
+  const windowWidth = numberEnv('ADP_WINDOW_WIDTH', 1600);
+  const windowHeight = numberEnv('ADP_WINDOW_HEIGHT', 1000);
+  const browserLocale = env('ADP_LOCALE', 'en-CA');
+  const browserTimezone = env('ADP_TIMEZONE_ID', env('CALENDAR_TIMEZONE', 'America/Vancouver'));
+  const userAgent = envRaw('ADP_USER_AGENT', '');
+
   const launchOptions = {
     headless,
-    args: headless ? [] : ['--start-maximized']
+    args: headless ? [] : [`--window-size=${windowWidth},${windowHeight}`]
   };
 
   const contextOptions = {
-    viewport: headless ? { width: 1600, height: 1000 } : null,
-    acceptDownloads: true
+    viewport: headless ? { width: windowWidth, height: windowHeight } : null,
+    acceptDownloads: true,
+    locale: browserLocale,
+    timezoneId: browserTimezone
   };
+
+  if (userAgent) {
+    contextOptions.userAgent = userAgent;
+  }
+
+  console.log(`Browser locale: ${browserLocale}`);
+  console.log(`Browser timezone: ${browserTimezone}`);
+  console.log(`Browser window/viewport target: ${windowWidth}x${windowHeight}`);
+  if (userAgent) console.log('Browser user agent override: enabled');
 
   let browser = null;
   let context = null;
