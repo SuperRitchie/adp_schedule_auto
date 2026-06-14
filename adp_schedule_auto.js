@@ -111,6 +111,91 @@ async function getVisibleText(page) {
   return page.locator('body').innerText({ timeout: 10_000 }).catch(() => '');
 }
 
+function debugEnabled() {
+  return boolEnv('ADP_DEBUG', false);
+}
+
+function textPreview(text, maxLength = 900) {
+  const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+  if (cleaned.length <= maxLength) return cleaned;
+  return `${cleaned.slice(0, maxLength)}...`;
+}
+
+function detectMfaOrSecurityCheckpoint(text) {
+  const body = String(text || '');
+  const patterns = [
+    /security checkpoint/i,
+    /multi[-\s]?factor/i,
+    /multifactor/i,
+    /authenticator/i,
+    /verification code/i,
+    /security code/i,
+    /one[-\s]?time (?:passcode|password|code)/i,
+    /enter (?:the )?(?:verification|security|authentication) code/i,
+    /verify your identity/i,
+    /we need to verify/i,
+    /send(?:ing)? (?:a )?code/i,
+    /try another way/i,
+  ];
+
+  const matched = patterns.find(pattern => pattern.test(body));
+  return {
+    detected: Boolean(matched),
+    matched_pattern: matched ? matched.source : null,
+    preview: textPreview(body, 700),
+  };
+}
+
+async function saveDebugSnapshot(page, outputDir, reason, extra = {}) {
+  if (!page) return null;
+
+  await fs.mkdir(outputDir, { recursive: true });
+  const stamp = timestamp();
+  const safeReason = String(reason || 'debug').replace(/[^a-z0-9_-]+/gi, '_').toLowerCase();
+  const base = `debug_${safeReason}_${stamp}`;
+  const htmlPath = path.join(outputDir, `${base}.html`);
+  const textPath = path.join(outputDir, `${base}.visible_text.txt`);
+  const screenshotPath = path.join(outputDir, `${base}.png`);
+  const metadataPath = path.join(outputDir, `${base}.debug.json`);
+
+  const [html, visibleText, title, url] = await Promise.all([
+    page.content().catch(error => `<!-- Failed to read page HTML: ${error.message} -->`),
+    getVisibleText(page),
+    page.title().catch(() => ''),
+    Promise.resolve(page.url()).catch(() => ''),
+  ]);
+
+  await fs.writeFile(htmlPath, html, 'utf8').catch(error => console.warn(`Debug HTML write failed: ${error.message}`));
+  await fs.writeFile(textPath, visibleText, 'utf8').catch(error => console.warn(`Debug text write failed: ${error.message}`));
+  await page.screenshot({ path: screenshotPath, fullPage: true }).catch(error => console.warn(`Debug screenshot failed: ${error.message}`));
+
+  const metadata = {
+    captured_at: new Date().toISOString(),
+    reason,
+    url,
+    title,
+    visible_text_preview: textPreview(visibleText),
+    html_file: htmlPath,
+    visible_text_file: textPath,
+    screenshot_file: await fileExists(screenshotPath) ? screenshotPath : null,
+    ...extra,
+  };
+  await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8').catch(error => console.warn(`Debug metadata write failed: ${error.message}`));
+
+  console.log(`Saved debug snapshot: ${metadataPath}`);
+  if (metadata.screenshot_file) console.log(`Saved debug screenshot: ${metadata.screenshot_file}`);
+  return { htmlPath, textPath, screenshotPath, metadataPath };
+}
+
+async function stopTraceIfActive(context, outputDir, label) {
+  if (!context) return null;
+  await fs.mkdir(outputDir, { recursive: true });
+  const tracePath = path.join(outputDir, `trace_${label}_${timestamp()}.zip`);
+  await context.tracing.stop({ path: tracePath });
+  console.log(`Saved Playwright trace: ${tracePath}`);
+  return tracePath;
+}
+
 async function locatorVisible(locator, timeout = 750) {
   try {
     return (await locator.count()) > 0 && await locator.first().isVisible({ timeout });
@@ -405,8 +490,9 @@ async function waitUntilTimeLandingOrLoggedIn(page) {
     if (/Team Schedule/i.test(text) || /My Calendar/i.test(text) || /My Timecard/i.test(text) || /Time - MyADP/i.test(await page.title().catch(() => ''))) {
       return;
     }
-    if (/security checkpoint|verification|verify|multi-factor|multifactor|authenticator|code/i.test(text)) {
-      if (headless) throw new Error('ADP is asking for MFA/security checkpoint. Run once with ADP_HEADLESS=false and complete it manually.');
+    const mfaInfo = detectMfaOrSecurityCheckpoint(text);
+    if (mfaInfo.detected) {
+      if (headless) throw new Error(`ADP is asking for MFA/security checkpoint. Matched: ${mfaInfo.matched_pattern}. Run once with ADP_HEADLESS=false and complete it manually.`);
       console.log('\nADP security checkpoint/MFA detected. Complete it in the browser window.');
       await ask('After the Time landing page appears, press Enter here... ');
       return;
@@ -423,21 +509,42 @@ async function waitUntilTimeLandingOrLoggedIn(page) {
 }
 
 
-async function isMfaOrSecurityCheckpointVisible(page) {
+async function getMfaOrSecurityCheckpointInfo(page) {
   const text = await getVisibleText(page);
-  return /security checkpoint|verification|verify|multi-factor|multifactor|authenticator|code/i.test(text);
+  return detectMfaOrSecurityCheckpoint(text);
+}
+
+async function isMfaOrSecurityCheckpointVisible(page) {
+  const info = await getMfaOrSecurityCheckpointInfo(page);
+  return info.detected;
 }
 
 async function waitForAuthToSettle(page) {
   const headless = boolEnv('ADP_HEADLESS', false);
   const timeoutMs = Number(env('ADP_POST_LOGIN_TIMEOUT_MS', '90000'));
+  const outputDir = path.resolve(env('OUTPUT_DIR', 'captures'));
   const start = Date.now();
+  let lastDebugLogAt = 0;
 
   console.log(`Waiting up to ${timeoutMs}ms for ADP login/MFA to settle...`);
 
   while (Date.now() - start < timeoutMs) {
-    if (await isMfaOrSecurityCheckpointVisible(page)) {
-      if (headless) throw new Error('ADP is asking for MFA/security checkpoint. Run once with ADP_HEADLESS=false and complete it manually.');
+    const elapsed = Date.now() - start;
+
+    // Check success first. The old MFA detector was too broad and could match
+    // normal logged-in ADP pages that happen to contain words like "code".
+    if (await isLikelyLoggedIn(page)) {
+      console.log('ADP appears to be past the login screen. Continuing.');
+      return;
+    }
+
+    const mfaInfo = await getMfaOrSecurityCheckpointInfo(page);
+    if (mfaInfo.detected) {
+      console.log(`Possible ADP MFA/security checkpoint detected. Matched pattern: ${mfaInfo.matched_pattern}`);
+      if (debugEnabled() || headless) {
+        await saveDebugSnapshot(page, outputDir, 'mfa_or_security_checkpoint', { mfa_detection: mfaInfo });
+      }
+      if (headless) throw new Error(`ADP is asking for MFA/security checkpoint. Matched: ${mfaInfo.matched_pattern}. Check the uploaded adp-debug-artifacts artifact for a screenshot/HTML of what GitHub Actions saw.`);
       console.log('\nADP security checkpoint/MFA detected. Complete it in the browser window.');
       await ask('After ADP finishes logging in, press Enter here... ');
       return;
@@ -450,10 +557,17 @@ async function waitForAuthToSettle(page) {
     const passInput = await findPasswordInput(page, 250);
     if (!userInput && !passInput) {
       await page.waitForTimeout(1500);
+      console.log('Login fields disappeared. Continuing to the next ADP page.');
       return;
     }
 
-    if (await isLikelyLoggedIn(page)) return;
+    if (debugEnabled() && elapsed - lastDebugLogAt >= 5000) {
+      lastDebugLogAt = elapsed;
+      const text = await getVisibleText(page);
+      console.log(`[debug] auth wait ${Math.round(elapsed / 1000)}s url=${page.url()}`);
+      console.log(`[debug] auth page preview: ${textPreview(text, 350)}`);
+    }
+
     await page.waitForTimeout(750);
   }
 
@@ -461,7 +575,8 @@ async function waitForAuthToSettle(page) {
     console.log('\nI could not confirm that ADP finished logging in automatically. Complete any remaining login/MFA step in the browser.');
     await ask('When ADP is past the login screen, press Enter here... ');
   } else {
-    throw new Error('Could not confirm ADP login in headless mode.');
+    if (debugEnabled() || headless) await saveDebugSnapshot(page, outputDir, 'auth_timeout');
+    throw new Error('Could not confirm ADP login in headless mode. Check the uploaded adp-debug-artifacts artifact for a screenshot/HTML of what GitHub Actions saw.');
   }
 }
 
@@ -906,6 +1021,7 @@ async function main() {
   let browser = null;
   let context = null;
   let page = null;
+  let traceActive = false;
 
   if (incognito) {
     console.log('Launching Chromium with a temporary incognito browser context. No cookies/session will be saved after this run.');
@@ -920,6 +1036,14 @@ async function main() {
       ...contextOptions
     });
     page = context.pages()[0] || await context.newPage();
+  }
+
+  const traceEnabled = boolEnv('ADP_TRACE', debugEnabled());
+  if (traceEnabled) {
+    await fs.mkdir(outputDir, { recursive: true });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    traceActive = true;
+    console.log('Playwright tracing is enabled. A trace ZIP will be saved under captures/.');
   }
 
   try {
@@ -953,12 +1077,30 @@ async function main() {
 
     await runParser(savedHtmlPaths, parsedOutDir);
 
+    if (traceActive) {
+      await stopTraceIfActive(context, outputDir, 'success');
+      traceActive = false;
+    }
+
     console.log('\nDone. Key files:');
     console.log(`- Captured HTML files:`);
     for (const htmlPath of savedHtmlPaths) console.log(`  - ${htmlPath}`);
     if (latestSaved) console.log(`- Latest captured HTML alias: ${latestSaved.latestPath}`);
     console.log(`- Visible text:  ${path.join(outputDir, 'latest_visible_text.txt')}`);
     console.log(`- Parsed output: ${parsedOutDir}`);
+  } catch (error) {
+    console.warn(`Saving debug artifacts because automation failed: ${error.message || error}`);
+    await saveDebugSnapshot(page, outputDir, 'automation_failure', {
+      error_message: error.message || String(error),
+      error_stack: error.stack || null,
+    }).catch(snapshotError => console.warn(`Could not save debug snapshot: ${snapshotError.message}`));
+
+    if (traceActive) {
+      await stopTraceIfActive(context, outputDir, 'failure').catch(traceError => console.warn(`Could not save Playwright trace: ${traceError.message}`));
+      traceActive = false;
+    }
+
+    throw error;
   } finally {
     if (context) await context.close();
     if (browser) await browser.close();

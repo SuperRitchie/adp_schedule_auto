@@ -160,6 +160,26 @@ Paste the copied value into the GitHub secret.
 
 After committing and pushing the workflow file, go to the repo's **Actions** tab, select **Capture ADP schedule and upload to Google Drive**, then click **Run workflow**.
 
+
+### Seeing what GitHub Actions saw
+
+The workflow now turns on debug mode in GitHub Actions:
+
+```env
+ADP_DEBUG=true
+ADP_TRACE=true
+```
+
+If the capture step fails, open the failed workflow run and download the artifact named `adp-debug-artifacts`. It can include screenshots, visible text, HTML snapshots, metadata JSON, and a Playwright trace ZIP.
+
+To inspect a Playwright trace locally:
+
+```bash
+npx playwright show-trace captures/trace_failure_*.zip
+```
+
+The debug artifacts can contain login page details and employee schedule data, so do not share them publicly.
+
 ### Important MFA note
 
 The workflow runs headless. If ADP requires MFA every time, GitHub Actions cannot complete that step automatically. In that case, either run the script locally, use a self-hosted runner where you can complete MFA, or keep using the local browser flow.

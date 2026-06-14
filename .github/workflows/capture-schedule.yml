@@ -59,6 +59,9 @@ jobs:
           ADP_SCROLL_DELAY_MS=500
           ADP_NEXT_WEEK_DELAY_MS=1500
           ADP_NEXT_WEEK_TIMEOUT_MS=45000
+          ADP_POST_LOGIN_TIMEOUT_MS=120000
+          ADP_DEBUG=true
+          ADP_TRACE=true
           CALENDAR_TIMEZONE=America/Vancouver
           CALENDAR_ALARMS=1440,180,60
           EOF
@@ -87,8 +90,13 @@ jobs:
         with:
           name: adp-debug-artifacts
           path: |
+            captures/*.debug.json
             captures/*.metadata.json
+            captures/*.png
+            captures/*.html
+            captures/*.visible_text.txt
             captures/latest_visible_text.txt
+            captures/trace_*.zip
             parsed_schedule/parse_summary.json
           if-no-files-found: ignore
           retention-days: 3
