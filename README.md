@@ -23,6 +23,15 @@ ADP_PASSWORD=your_password_here
 ADP_HEADLESS=false
 ADP_INCOGNITO=true
 ADP_LOGIN_TIMEOUT_MS=45000
+
+# Keep the file name as .env. The script loads .env from this repo folder.
+ADP_SELECT_ALL_JOBS=true
+ADP_FILTER_DELAY_MS=700
+
+# 4 = current week plus 3 future weeks.
+ADP_WEEKS_TO_CAPTURE=4
+ADP_NEXT_WEEK_DELAY_MS=1000
+ADP_NEXT_WEEK_TIMEOUT_MS=45000
 ```
 
 Do not commit `.env`, `.auth`, `captures`, or `parsed_schedule`.
@@ -62,6 +71,27 @@ Filling password...
 ```
 
 If ADP shows MFA/security verification, finish that manually in the browser window. The script will not bypass MFA.
+
+
+## Schedule capture behavior
+
+By default the script now does three extra things before parsing:
+
+1. Opens the **Locations and jobs** dropdown.
+2. Clicks **Select All** and applies the filter.
+3. Captures 4 weeks total, which means the current week plus the next 3 weeks.
+
+Useful `.env` settings:
+
+```env
+ADP_SELECT_ALL_JOBS=true
+ADP_FILTER_DELAY_MS=700
+ADP_WEEKS_TO_CAPTURE=4
+ADP_NEXT_WEEK_DELAY_MS=1000
+ADP_NEXT_WEEK_TIMEOUT_MS=45000
+```
+
+If the dropdown is slow to update, raise `ADP_FILTER_DELAY_MS` to `1000` or `1500`.
 
 ## Important notes
 

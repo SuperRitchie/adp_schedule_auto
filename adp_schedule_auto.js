@@ -509,6 +509,132 @@ async function navigateToTeamSchedule(page, context) {
   return page;
 }
 
+
+async function readScheduleDateRange(page) {
+  const text = await getVisibleText(page);
+  const match = text.match(/\b\d{1,2}\/\d{1,2}\/\d{4}\s*-\s*\d{1,2}\/\d{1,2}\/\d{4}\b/);
+  return match ? match[0] : '';
+}
+
+async function waitForScheduleGridReady(page) {
+  const timeoutMs = Number(env('ADP_SCHEDULE_READY_TIMEOUT_MS', '45000'));
+  await page.waitForSelector('.ag-header-cell[col-id="name"], .ag-center-cols-container div[role="row"], text=/Name\\s*\\[\\d+\\]/', {
+    timeout: timeoutMs,
+  }).catch(() => {});
+  await page.waitForTimeout(1000);
+}
+
+async function getLocationJobsLabel(page) {
+  const locator = page.locator('button#location-schedule-jobs-selector, [automation-id="location-schedule-jobs-selector"] button').first();
+  return cleanOneLine(await locator.innerText({ timeout: 2000 }).catch(() => ''));
+}
+
+function cleanOneLine(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+async function ensureAllLocationsAndJobsSelected(page) {
+  if (!boolEnv('ADP_SELECT_ALL_JOBS', true)) return;
+
+  const delayMs = Number(env('ADP_FILTER_DELAY_MS', '700'));
+  console.log('Ensuring all Locations and jobs are selected...');
+
+  const dropdownButton = page.locator('button#location-schedule-jobs-selector, [automation-id="location-schedule-jobs-selector"] button').first();
+  if (!(await locatorVisible(dropdownButton, 5000))) {
+    console.warn('Could not find the Locations and jobs dropdown. Continuing with the current selection.');
+    return;
+  }
+
+  const beforeLabel = await getLocationJobsLabel(page);
+  await dropdownButton.click({ timeout: 10000 });
+  await page.waitForTimeout(delayMs);
+
+  let clickedSelectAll = false;
+  const selectAllByRole = page.getByRole('button', { name: /Select All/i }).first();
+  if (await locatorVisible(selectAllByRole, 3000)) {
+    await selectAllByRole.click({ timeout: 10000 });
+    clickedSelectAll = true;
+  } else {
+    const selectAllFallback = page.locator('button.helperButton').filter({ hasText: /Select All/i }).first();
+    if (await locatorVisible(selectAllFallback, 3000)) {
+      await selectAllFallback.click({ timeout: 10000 });
+      clickedSelectAll = true;
+    }
+  }
+
+  if (!clickedSelectAll) {
+    console.warn('Could not find the Select All button in Locations and jobs. Continuing with the current selection.');
+    await page.keyboard.press('Escape').catch(() => {});
+    return;
+  }
+
+  await page.waitForTimeout(delayMs);
+
+  const applyButton = page.locator('button.multi-select-apply-button, button[title="Apply"]').filter({ hasText: /Apply/i }).first();
+  if (await locatorVisible(applyButton, 3000)) {
+    const isEnabled = await applyButton.isEnabled().catch(() => false);
+    if (isEnabled) {
+      await applyButton.click({ timeout: 10000 });
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    } else {
+      // If everything was already selected, ADP leaves Apply disabled.
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+  } else {
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+
+  await page.waitForTimeout(delayMs + 1000);
+  await waitForScheduleGridReady(page);
+  const afterLabel = await getLocationJobsLabel(page);
+  console.log(`Locations/jobs filter updated: ${beforeLabel || 'unknown'} -> ${afterLabel || 'unknown'}.`);
+}
+
+async function clickNextScheduleWeek(page) {
+  const beforeRange = await readScheduleDateRange(page);
+  const timeoutMs = Number(env('ADP_NEXT_WEEK_TIMEOUT_MS', '45000'));
+  const delayMs = Number(env('ADP_NEXT_WEEK_DELAY_MS', '1000'));
+
+  console.log('Clicking Next to move to the following schedule week...');
+
+  const selectors = [
+    '#calendarNavigationNextAction button',
+    'button[aria-label="Next Week"]',
+    '[title="Next Week"] button',
+  ];
+
+  let clicked = false;
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    if (await locatorVisible(locator, 1500)) {
+      await locator.click({ timeout: 10000 });
+      clicked = true;
+      break;
+    }
+  }
+
+  if (!clicked) {
+    clicked = await clickButtonLike(page, [/Next Week/i, /^Next$/i], 1500).catch(() => false);
+  }
+
+  if (!clicked) throw new Error('Could not find/click the Next Week button.');
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    await page.waitForTimeout(500);
+    const currentRange = await readScheduleDateRange(page);
+    if (currentRange && currentRange !== beforeRange) {
+      await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+      await page.waitForTimeout(delayMs);
+      await waitForScheduleGridReady(page);
+      console.log(`Now viewing schedule week: ${currentRange}`);
+      return currentRange;
+    }
+  }
+
+  throw new Error(`Clicked Next Week, but the date range did not change within ${timeoutMs}ms. Previous range: ${beforeRange || 'unknown'}`);
+}
+
 async function collectVirtualGridRows(page) {
   console.log('Collecting all rendered schedule rows while scrolling the virtualized grid...');
 
@@ -728,12 +854,13 @@ async function saveCapture(page, outputDir, virtualGridCapture = null) {
   return { htmlPath, latestPath, textPath, screenshotPath, metadataPath };
 }
 
-function runParser(htmlPath, outDir) {
+function runParser(htmlPaths, outDir) {
   return new Promise((resolve, reject) => {
     const python = process.platform === 'win32' ? 'python' : 'python3';
+    const inputFiles = Array.isArray(htmlPaths) ? htmlPaths : [htmlPaths];
     const args = [
       'team_schedule_parser.py',
-      htmlPath,
+      ...inputFiles,
       '--out-dir', outDir,
       '--timezone', env('CALENDAR_TIMEZONE', 'America/Vancouver'),
       '--calendar-location', env('CALENDAR_LOCATION', ''),
@@ -801,12 +928,35 @@ async function main() {
     await waitForAuthToSettle(page);
     page = await navigateToWorkFeaturesPage(page);
     page = await navigateToTeamSchedule(page, context);
-    const virtualGridCapture = await collectVirtualGridRows(page);
-    const saved = await saveCapture(page, outputDir, virtualGridCapture);
-    await runParser(saved.latestPath, parsedOutDir);
+
+    const weeksToCaptureRaw = Number.parseInt(env('ADP_WEEKS_TO_CAPTURE', '4'), 10);
+    const weeksToCapture = Number.isFinite(weeksToCaptureRaw) && weeksToCaptureRaw > 0 ? weeksToCaptureRaw : 4;
+    const savedHtmlPaths = [];
+    let latestSaved = null;
+
+    for (let weekIndex = 0; weekIndex < weeksToCapture; weekIndex += 1) {
+      await waitForScheduleGridReady(page);
+      await ensureAllLocationsAndJobsSelected(page);
+      await waitForScheduleGridReady(page);
+
+      const currentRange = await readScheduleDateRange(page);
+      console.log(`\nCapturing week ${weekIndex + 1}/${weeksToCapture}${currentRange ? `: ${currentRange}` : ''}`);
+
+      const virtualGridCapture = await collectVirtualGridRows(page);
+      latestSaved = await saveCapture(page, outputDir, virtualGridCapture);
+      savedHtmlPaths.push(latestSaved.htmlPath);
+
+      if (weekIndex < weeksToCapture - 1) {
+        await clickNextScheduleWeek(page);
+      }
+    }
+
+    await runParser(savedHtmlPaths, parsedOutDir);
 
     console.log('\nDone. Key files:');
-    console.log(`- Captured HTML: ${saved.latestPath}`);
+    console.log(`- Captured HTML files:`);
+    for (const htmlPath of savedHtmlPaths) console.log(`  - ${htmlPath}`);
+    if (latestSaved) console.log(`- Latest captured HTML alias: ${latestSaved.latestPath}`);
     console.log(`- Visible text:  ${path.join(outputDir, 'latest_visible_text.txt')}`);
     console.log(`- Parsed output: ${parsedOutDir}`);
   } finally {
