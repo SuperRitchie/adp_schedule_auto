@@ -1,0 +1,14 @@
+{
+  "name": "adp-schedule-auto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "capture": "node adp_schedule_auto.js",
+    "parse": "python3 team_schedule_parser.py captures/latest_schedule.html --out-dir parsed_schedule"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "playwright": "^1.49.1"
+  }
+}

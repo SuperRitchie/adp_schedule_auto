@@ -1,0 +1,41 @@
+# Local secrets
+.env
+.env.local
+.env.*.local
+
+# ADP/Playwright browser sessions and auth state
+.auth/
+playwright/.auth/
+storageState*.json
+
+# Captured ADP pages and generated employee schedule outputs
+captures/
+parsed_schedule/
+downloads/
+out/
+output/
+
+# Playwright artifacts
+playwright-report/
+test-results/
+trace_*.zip
+*.har
+*.webm
+
+# Dependencies
+node_modules/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Logs and OS/editor files
+*.log
+.DS_Store
+.vscode/
+.idea/
+
+# Local zip exports
+adp_schedule_auto.zip
