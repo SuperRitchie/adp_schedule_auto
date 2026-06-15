@@ -5,13 +5,11 @@
   This script:
   1) Opens ADP/MyADP using Playwright.
   2) Attempts a normal username/password login from .env, if a login form appears.
-  3) Waits for you to finish MFA/security checkpoint manually when required.
+  3) Attempts to auto-resolve MFA by expanding details, selecting Gmail, and polling the Gmail API for the code.
   4) Navigates to My Work Features, then opens Team Schedule.
   5) Scrolls the virtualized grid to load as many rows as possible.
   6) Saves the schedule HTML.
   7) Runs team_schedule_parser.py to create CSV/JSON and employee .ics files.
-
-  It does not bypass MFA and it does not ask you to paste credentials into chat.
 */
 
 const fsSync = require('fs');
@@ -22,10 +20,17 @@ const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 const dotenv = require('dotenv');
 
+let google = null;
+
 loadEnvFiles();
 
 const DEFAULT_START_URL = 'https://my.adp.com/#/time';
 const DEFAULT_WORK_FEATURES_URL = 'https://my.adp.com/#/time/myworkfeatures';
+
+// Scopes required for reading emails
+const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
+const TOKEN_PATH = path.join(__dirname, 'token.json');
+const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
 
 function loadEnvFiles() {
   // dotenv normally reads from the current working directory only. That breaks
@@ -115,6 +120,19 @@ function credentialEnv(name) {
   return rawValue;
 }
 
+function getGoogleApis() {
+  if (google) return google;
+
+  try {
+    ({ google } = require('googleapis'));
+    return google;
+  } catch (error) {
+    throw new Error(
+      `googleapis is required for Gmail-assisted MFA, but it is not installed. Run npm install in this repo or complete MFA manually. Original error: ${error.message}`
+    );
+  }
+}
+
 function boolEnv(name, fallback = false) {
   const value = env(name, String(fallback)).toLowerCase();
   return ['1', 'true', 'yes', 'y'].includes(value);
@@ -187,6 +205,69 @@ function detectMfaOrSecurityCheckpoint(text) {
   };
 }
 
+function decodeBase64Url(value) {
+  const normalized = String(value || '').replace(/-/g, '+').replace(/_/g, '/');
+  const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+  return Buffer.from(`${normalized}${padding}`, 'base64').toString('utf8');
+}
+
+function collectMessageText(payload) {
+  if (!payload) return '';
+
+  const chunks = [];
+  if (payload.body && payload.body.data) {
+    chunks.push(decodeBase64Url(payload.body.data));
+  }
+
+  if (Array.isArray(payload.parts)) {
+    for (const part of payload.parts) {
+      chunks.push(collectMessageText(part));
+    }
+  }
+
+  return chunks.filter(Boolean).join('\n');
+}
+
+function extractAdpCodeFromMessage(message) {
+  const headers = Array.isArray(message?.data?.payload?.headers) ? message.data.payload.headers : [];
+  const subject = headers.find(header => String(header.name || '').toLowerCase() === 'subject')?.value || '';
+  const bodyText = [
+    message?.data?.snippet || '',
+    subject,
+    collectMessageText(message?.data?.payload),
+  ].filter(Boolean).join('\n');
+
+  const preferredPatterns = [
+    /(?:verification|security|authentication|passcode|one[-\s]?time)\D{0,24}(\d{6})/i,
+    /(?:code|otp)\D{0,24}(\d{6})/i,
+  ];
+
+  for (const pattern of preferredPatterns) {
+    const match = bodyText.match(pattern);
+    if (match && match[1]) return match[1];
+  }
+
+  const fallback = bodyText.match(/\b(\d{6})\b/);
+  return fallback ? fallback[1] : null;
+}
+
+function latestOpenPage(context) {
+  const openPages = context.pages().filter(page => !page.isClosed());
+  return openPages[openPages.length - 1] || null;
+}
+
+async function recoverOpenPage(context, page, label) {
+  if (page && !page.isClosed()) return page;
+
+  const replacement = latestOpenPage(context);
+  if (replacement) {
+    console.log(`${label}: the active page closed, switching to the most recent open tab.`);
+    return replacement;
+  }
+
+  throw new Error(`${label}: the active page closed and no replacement tab was available.`);
+}
+
 async function saveDebugSnapshot(page, outputDir, reason, extra = {}) {
   if (!page) return null;
 
@@ -200,7 +281,7 @@ async function saveDebugSnapshot(page, outputDir, reason, extra = {}) {
   const metadataPath = path.join(outputDir, `${base}.debug.json`);
 
   const [html, visibleText, title, url] = await Promise.all([
-    page.content().catch(error => `<!-- Failed to read page HTML: ${error.message} -->`),
+    page.content().catch(error => ``),
     getVisibleText(page),
     page.title().catch(() => ''),
     Promise.resolve(page.url()).catch(() => ''),
@@ -263,9 +344,6 @@ async function locatorIsFillable(locator, timeout = 750) {
       }
       if (node.isContentEditable || contentEditable === 'true' || role === 'textbox') return true;
 
-      // Some ADP/SDF fields are custom elements that contain a real input inside
-      // their light DOM. Shadow DOM inputs are normally reachable through
-      // Playwright's CSS selectors, but this helps with custom wrappers.
       const nested = node.querySelector?.('input:not([type=checkbox]):not([type=radio]):not([type=hidden]), textarea, [contenteditable=true], [role=textbox]');
       return Boolean(nested);
     });
@@ -295,8 +373,6 @@ async function firstVisibleInputByLabel(page, labels, timeout = 750) {
 }
 
 async function findUsernameInput(page, timeout = 750) {
-  // Prefer actual input selectors first. getByLabel(/user id/i) can match
-  // ADP's "Remember user ID" checkbox, which is not fillable.
   return await firstVisibleInput(page, USERNAME_SELECTORS, timeout)
     || await firstVisibleInputByLabel(page, USERNAME_LABELS, timeout);
 }
@@ -348,13 +424,8 @@ function valueLooksFilled(currentValue, expectedValue, label) {
 
   if (current === expected) return true;
 
-  // Password widgets sometimes mask or intentionally hide the readable value
-  // after a successful fill. Seeing any value is enough to continue.
   if (/password/i.test(label) && current.length > 0) return true;
 
-  // ADP may normalize username casing or formatting. If the field is non-empty
-  // after fill(), do not destroy it with a retry just because the exact string
-  // comparison failed.
   if (/user/i.test(label) && current.length > 0) return true;
 
   return false;
@@ -375,18 +446,11 @@ async function fillInput(page, locator, value, label) {
   let currentValue = await readInputValue(locator, 1000);
   if (valueLooksFilled(currentValue, value, label)) return true;
 
-  // Some ADP widgets re-render immediately after fill(), especially in
-  // incognito. If the original locator disappeared, assume the fill caused the
-  // page to advance and let the caller continue to the next step. This avoids
-  // timing out while trying to type into a stale username locator.
   if (!(await locatorIsFillable(locator, 500))) {
     console.log(`${label} field changed or disappeared after fill(); continuing to the next login step.`);
     return true;
   }
 
-  // Some login widgets ignore a fast fill until the field is focused/keyed.
-  // Retry using page-level keyboard events instead of locator.pressSequentially(),
-  // because ADP can detach/recreate the element during typing.
   console.log(`${label} value did not appear to stick; retrying with keyboard events...`);
   await locator.click({ timeout: 5_000 }).catch(() => {});
 
@@ -444,7 +508,6 @@ async function clickButtonLike(page, patterns, timeout = 1500) {
       if (await locatorVisible(textLocator, timeout)) {
         await textLocator.click({ trial: true }).catch(() => {});
         await textLocator.click().catch(async () => {
-          // Text may be inside a non-clickable child. Try a nearby button/link.
           const handle = await textLocator.elementHandle().catch(() => null);
           if (!handle) throw new Error('No element handle');
           await handle.evaluate(el => {
@@ -494,9 +557,6 @@ async function attemptLogin(page) {
     console.log('Username field was not visible. ADP may have remembered the username or moved to a password-only step.');
   }
 
-  // ADP often shows username and password on the same screen. Fill password
-  // before clicking Sign in. If the screen is a two-step login, click Next and
-  // then wait for the password field.
   passInput = await findPasswordInput(page, 1500);
   if (!passInput && userInput) {
     const clickedNext = await clickButtonLike(page, [/next/i, /continue/i], 1000).catch(() => false);
@@ -523,6 +583,171 @@ async function attemptLogin(page) {
   await page.waitForLoadState('networkidle', { timeout: 15_000 }).catch(() => {});
   await page.waitForTimeout(3000);
 }
+
+// ============================================================================
+// GMAIL API & MFA AUTO-HANDLING FUNCTIONS
+// ============================================================================
+
+/**
+ * Authenticates with the Gmail API, prompting the user via CLI on the first run.
+ */
+async function authorizeGmail() {
+  const content = await fs.readFile(CREDENTIALS_PATH, 'utf8').catch(() => {
+    throw new Error('Error loading client secret file. Please ensure credentials.json exists.');
+  });
+  const credentials = JSON.parse(content);
+  const clientConfig = credentials.installed || credentials.web || credentials.desktop;
+
+  if (!clientConfig) {
+    const topLevelKeys = Object.keys(credentials || {});
+    throw new Error(
+      `credentials.json must contain an installed, web, or desktop OAuth client. Found top-level keys: ${topLevelKeys.join(', ') || '(none)'}.
+Use a Google OAuth client JSON downloaded from Google Cloud Console, not a service-account key.`
+    );
+  }
+
+  const { client_secret, client_id, redirect_uris } = clientConfig;
+  if (!client_secret || !client_id || !Array.isArray(redirect_uris) || redirect_uris.length === 0) {
+    const keySummary = Object.keys(clientConfig).sort().join(', ') || '(none)';
+    throw new Error(
+      `credentials.json is missing client_id, client_secret, or redirect_uris for Gmail OAuth. ` +
+      `Found keys inside ${credentials.installed ? 'installed' : credentials.web ? 'web' : 'desktop'}: ${keySummary}. ` +
+      `Create a Desktop app OAuth client in Google Cloud Console and download its JSON, or add a valid redirect_uris array to the OAuth client config.`
+    );
+  }
+
+  const googleClient = getGoogleApis();
+  const oAuth2Client = new googleClient.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+
+  try {
+    const token = await fs.readFile(TOKEN_PATH, 'utf8');
+    oAuth2Client.setCredentials(JSON.parse(token));
+  } catch (err) {
+    return await getNewToken(oAuth2Client);
+  }
+  return oAuth2Client;
+}
+
+async function getNewToken(oAuth2Client) {
+  const authUrl = oAuth2Client.generateAuthUrl({
+    access_type: 'offline',
+    scope: SCOPES,
+  });
+  console.log('Authorize this app by visiting this url:', authUrl);
+  const code = await ask('Enter the code from that page here: ');
+  const { tokens } = await oAuth2Client.getToken(code);
+  oAuth2Client.setCredentials(tokens);
+  await fs.writeFile(TOKEN_PATH, JSON.stringify(tokens));
+  console.log('Token stored to', TOKEN_PATH);
+  return oAuth2Client;
+}
+
+/**
+ * Polls the Gmail API for the latest unread ADP verification code.
+ */
+async function fetchLatestAdpCode(auth) {
+  const googleClient = getGoogleApis();
+  const gmail = googleClient.gmail({ version: 'v1', auth });
+  const maxAttempts = 12; // Poll for 60 seconds total (5s intervals)
+  const query = env('ADP_GMAIL_QUERY', 'from:SecurityServices_NoReply@adp.com newer_than:1d');
+  
+  console.log('Polling Gmail for the verification code...');
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const res = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 5,
+    });
+
+    const messages = res.data.messages;
+    if (messages && messages.length > 0) {
+      for (const message of messages) {
+        const msg = await gmail.users.messages.get({
+          userId: 'me',
+          id: message.id,
+          format: 'full',
+        });
+
+        const code = extractAdpCodeFromMessage(msg);
+        if (code) {
+          console.log(`Successfully extracted ADP code: ${code}`);
+          return code;
+        }
+      }
+    }
+    
+    // Wait 5 seconds before checking again
+    await new Promise(resolve => setTimeout(resolve, 5000));
+  }
+  
+  return null;
+}
+
+/**
+ * Navigates the ADP MFA UI and injects the code retrieved from Gmail.
+ */
+async function autoHandleMfa(page) {
+  console.log("Attempting to auto-resolve MFA via Gmail...");
+
+  // 1. Expand the "Show additional details" drawer if it exists
+  const showDetailsBtn = page.getByText('Show additional details');
+  if (await locatorVisible(showDetailsBtn, 3000)) {
+    console.log("Clicking 'Show additional details'...");
+    await showDetailsBtn.click();
+    await page.waitForTimeout(1000); // Allow drawer to animate open
+  }
+
+  // 2. Select the Gmail option
+  const gmailOption = page.getByText(/gmail(\.com)?/i).first();
+  if (await locatorVisible(gmailOption, 3000)) {
+    console.log("Selecting the Gmail delivery option...");
+    await gmailOption.click();
+  } else {
+    throw new Error("Could not find the Gmail option in the MFA prompt.");
+  }
+
+  // 3. Wait for the Passcode input field to appear
+  const passcodeField = page.getByRole('textbox', { name: /passcode/i }).first();
+  await waitForLocator(() => locatorVisible(passcodeField, 1000) ? passcodeField : null, 15000, 'Passcode input field');
+
+  // 4. Retrieve the code via the Gmail API
+  const auth = await authorizeGmail();
+  const code = await fetchLatestAdpCode(auth);
+
+  if (!code) {
+    throw new Error("Failed to retrieve the verification code from Gmail within the timeout.");
+  }
+
+  // 5. Enter the code and submit
+  console.log("Submitting the code to ADP...");
+  await passcodeField.fill(code);
+  
+  const submitCandidates = [
+    page.getByRole('button', { name: /Submit/i }).first(),
+    page.getByRole('button', { name: /Continue/i }).first(),
+    page.getByRole('button', { name: /Verify/i }).first(),
+    page.getByRole('button', { name: /Next/i }).first(),
+  ];
+
+  let submitBtn = null;
+  for (const candidate of submitCandidates) {
+    if (await locatorVisible(candidate, 2000)) {
+      submitBtn = candidate;
+      break;
+    }
+  }
+
+  if (submitBtn) {
+    await submitBtn.click();
+  } else {
+    await passcodeField.press('Enter').catch(() => {});
+  }
+  
+  console.log("MFA code submitted successfully.");
+}
+
+// ============================================================================
 
 async function waitUntilTimeLandingOrLoggedIn(page) {
   const headless = boolEnv('ADP_HEADLESS', false);
@@ -552,7 +777,6 @@ async function waitUntilTimeLandingOrLoggedIn(page) {
   }
 }
 
-
 async function getMfaOrSecurityCheckpointInfo(page) {
   const text = await getVisibleText(page);
   return detectMfaOrSecurityCheckpoint(text);
@@ -575,8 +799,6 @@ async function waitForAuthToSettle(page) {
   while (Date.now() - start < timeoutMs) {
     const elapsed = Date.now() - start;
 
-    // Check success first. The old MFA detector was too broad and could match
-    // normal logged-in ADP pages that happen to contain words like "code".
     if (await isLikelyLoggedIn(page)) {
       console.log('ADP appears to be past the login screen. Continuing.');
       return;
@@ -585,18 +807,29 @@ async function waitForAuthToSettle(page) {
     const mfaInfo = await getMfaOrSecurityCheckpointInfo(page);
     if (mfaInfo.detected) {
       console.log(`Possible ADP MFA/security checkpoint detected. Matched pattern: ${mfaInfo.matched_pattern}`);
-      if (debugEnabled() || headless) {
-        await saveDebugSnapshot(page, outputDir, 'mfa_or_security_checkpoint', { mfa_detection: mfaInfo });
+      
+      try {
+        await autoHandleMfa(page);
+        
+        // Reset the start timer to give ADP time to load the dashboard post-MFA
+        console.log("Waiting for post-MFA redirect...");
+        await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+        continue; // Let the while loop check for isLikelyLoggedIn again
+        
+      } catch (mfaError) {
+        console.error(`Automated MFA failed: ${mfaError.message}`);
+        
+        if (debugEnabled() || headless) {
+          await saveDebugSnapshot(page, outputDir, 'mfa_failure', { error: mfaError.message });
+        }
+        if (headless) throw new Error(`Automated MFA failed in headless mode: ${mfaError.message}`);
+        
+        console.log('\nFalling back to manual MFA. Complete it in the browser window.');
+        await ask('After ADP finishes logging in, press Enter here... ');
+        return;
       }
-      if (headless) throw new Error(`ADP is asking for MFA/security checkpoint. Matched: ${mfaInfo.matched_pattern}. Check the uploaded adp-debug-artifacts artifact for a screenshot/HTML of what GitHub Actions saw.`);
-      console.log('\nADP security checkpoint/MFA detected. Complete it in the browser window.');
-      await ask('After ADP finishes logging in, press Enter here... ');
-      return;
     }
 
-    // If the regular login fields are no longer visible, ADP has usually
-    // accepted the credentials and we can navigate directly to the Work
-    // Features page. This avoids waiting forever on a generic post-login page.
     const userInput = await findUsernameInput(page, 250);
     const passInput = await findPasswordInput(page, 250);
     if (!userInput && !passInput) {
@@ -624,7 +857,7 @@ async function waitForAuthToSettle(page) {
   }
 }
 
-async function navigateToWorkFeaturesPage(page) {
+async function navigateToWorkFeaturesPage(page, context) {
   if (env('TEAM_SCHEDULE_URL')) return page;
 
   const workFeaturesUrl = env('ADP_WORK_FEATURES_URL', DEFAULT_WORK_FEATURES_URL);
@@ -633,16 +866,22 @@ async function navigateToWorkFeaturesPage(page) {
   console.log(`Navigating to ADP My Work Features page: ${workFeaturesUrl}`);
   await page.goto(workFeaturesUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
   await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  if (context) {
+    page = await recoverOpenPage(context, page, 'ADP Work Features navigation');
+  }
   await page.waitForTimeout(3000);
   return page;
 }
 
 async function navigateToTeamSchedule(page, context) {
+  page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
+
   const directUrl = env('TEAM_SCHEDULE_URL');
   if (directUrl) {
     console.log(`Going directly to TEAM_SCHEDULE_URL: ${directUrl}`);
     await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+    page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
     return page;
   }
 
@@ -664,6 +903,7 @@ async function navigateToTeamSchedule(page, context) {
 
   await page.waitForLoadState('domcontentloaded', { timeout: 90_000 }).catch(() => {});
   await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+  page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
   await page.waitForTimeout(5000);
   return page;
 }
@@ -736,7 +976,6 @@ async function ensureAllLocationsAndJobsSelected(page) {
       await applyButton.click({ timeout: 10000 });
       await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
     } else {
-      // If everything was already selected, ADP leaves Apply disabled.
       await page.keyboard.press('Escape').catch(() => {});
     }
   } else {
@@ -844,8 +1083,6 @@ async function collectVirtualGridRows(page) {
         const rowIndex = row.getAttribute('row-index') || '';
         const primaryJob = cleanText(row.querySelector('[col-id="primaryJob"]')?.textContent || '');
 
-        // row-id is stable for regular employee rows. The pinned My Schedule row
-        // does not always have row-id, so fall back to name/job.
         const key = rowId ? `id:${rowId}` : `pinned:${name}:${primaryJob}`;
         rows.set(key, {
           key,
@@ -917,8 +1154,6 @@ async function collectVirtualGridRows(page) {
       await sleep(delayMs);
       collectVisibleRows(`scroll:${Math.min(y, max)}`);
 
-      // Header count does not include the pinned My Schedule row, so +1 lets
-      // us stop early once we have all employees plus the pinned row.
       if (expectedEmployeeCount && rows.size >= expectedEmployeeCount + 1) break;
     }
 
@@ -962,11 +1197,9 @@ function injectCapturedVirtualRows(html, virtualGridCapture) {
 
   const rowHtml = virtualGridCapture.rows.map(row => row.html).join('\n');
   const block = `
-<!-- ADP_SCHEDULE_CAPTURED_VIRTUAL_ROWS_START -->
 <div id="adp-schedule-captured-virtual-rows" class="ag-center-cols-container" data-captured-row-count="${virtualGridCapture.rowCount}">
 ${rowHtml}
 </div>
-<!-- ADP_SCHEDULE_CAPTURED_VIRTUAL_ROWS_END -->
 `;
 
   if (/<\/body>/i.test(html)) {
@@ -1111,7 +1344,7 @@ async function main() {
     await page.goto(startUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await attemptLogin(page);
     await waitForAuthToSettle(page);
-    page = await navigateToWorkFeaturesPage(page);
+    page = await navigateToWorkFeaturesPage(page, context);
     page = await navigateToTeamSchedule(page, context);
 
     const weeksToCaptureRaw = Number.parseInt(env('ADP_WEEKS_TO_CAPTURE', '4'), 10);

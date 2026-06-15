@@ -53,7 +53,6 @@ Outputs:
 - `parsed_schedule/calendar_index.json`
 - `parsed_schedule/parse_summary.json`
 
-
 ## Login troubleshooting
 
 If incognito opens the ADP login page but does not type anything, make sure you are running from the repo folder or use the patched script. The script now loads `.env` from both the current working directory and the script directory, then waits for the ADP login form to finish loading before filling fields.
@@ -72,6 +71,7 @@ Filling password...
 
 If ADP shows MFA/security verification, finish that manually in the browser window. The script will not bypass MFA.
 
+If you want Gmail-assisted MFA, install the Node dependencies, add `credentials.json` for a Gmail OAuth client, and let the script create `token.json` the first time it asks you to authorize access. You can override the Gmail search with `ADP_GMAIL_QUERY` if your ADP verification email subject or sender differs.
 
 ## Schedule capture behavior
 
@@ -130,14 +130,14 @@ Go to your GitHub repository, then **Settings → Secrets and variables → Acti
 
 Add these secrets:
 
-| Secret name | Value |
-| --- | --- |
-| `ADP_USERNAME_B64` | Base64-encoded ADP username. Preferred. |
-| `ADP_PASSWORD_B64` | Base64-encoded ADP password. Preferred. |
-| `ADP_USERNAME` | Optional raw ADP username fallback if the base64 secret is not set. |
-| `ADP_PASSWORD` | Optional raw ADP password fallback if the base64 secret is not set. |
-| `GOOGLE_DRIVE_FOLDER_ID` | The destination Google Drive folder ID. |
-| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON. |
+| Secret name                             | Value                                                               |
+| --------------------------------------- | ------------------------------------------------------------------- |
+| `ADP_USERNAME_B64`                      | Base64-encoded ADP username. Preferred.                             |
+| `ADP_PASSWORD_B64`                      | Base64-encoded ADP password. Preferred.                             |
+| `ADP_USERNAME`                          | Optional raw ADP username fallback if the base64 secret is not set. |
+| `ADP_PASSWORD`                          | Optional raw ADP password fallback if the base64 secret is not set. |
+| `GOOGLE_DRIVE_FOLDER_ID`                | The destination Google Drive folder ID.                             |
+| `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON.                         |
 
 The workflow now passes credentials directly to the Node.js and Python processes through environment variables. It does **not** write ADP credentials into a temporary `.env` file during GitHub Actions. The script prefers `ADP_USERNAME_B64` / `ADP_PASSWORD_B64` when they exist, then falls back to `ADP_USERNAME` / `ADP_PASSWORD`.
 
@@ -184,7 +184,6 @@ Paste the copied value into the GitHub secret.
 ### Manual workflow run
 
 After committing and pushing the workflow file, go to the repo's **Actions** tab, select **Capture ADP schedule and upload to Google Drive**, then click **Run workflow**.
-
 
 ### Seeing what GitHub Actions saw
 
