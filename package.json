@@ -5,7 +5,9 @@
   "type": "commonjs",
   "scripts": {
     "capture": "node adp_schedule_auto.js",
-    "parse": "python3 team_schedule_parser.py captures/latest_schedule.html --out-dir parsed_schedule"
+    "parse": "python3 team_schedule_parser.py captures/latest_schedule.html --out-dir parsed_schedule",
+    "gmail:auth": "node scripts/setup_gmail_oauth.js",
+    "gmail:check": "node scripts/check_gmail_token.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",

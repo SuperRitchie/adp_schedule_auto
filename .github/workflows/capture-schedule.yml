@@ -48,6 +48,34 @@ jobs:
       - name: Install Python dependencies
         run: python3 -m pip install -r requirements.txt
 
+      - name: Write Gmail OAuth files from secrets
+        env:
+          GOOGLE_CREDENTIALS_JSON_B64: ${{ secrets.GOOGLE_CREDENTIALS_JSON_B64 }}
+          GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
+        run: |
+          mkdir -p .secrets
+          if [ -n "$GOOGLE_CREDENTIALS_JSON_B64" ]; then
+            echo "$GOOGLE_CREDENTIALS_JSON_B64" | base64 --decode > .secrets/gmail_credentials.json
+          fi
+          if [ -n "$GOOGLE_TOKEN_JSON_B64" ]; then
+            echo "$GOOGLE_TOKEN_JSON_B64" | base64 --decode > .secrets/gmail_token.json
+          fi
+          chmod 600 .secrets/gmail_*.json 2>/dev/null || true
+
+      - name: Validate Gmail OAuth token
+        env:
+          GOOGLE_CREDENTIALS_JSON_B64: ${{ secrets.GOOGLE_CREDENTIALS_JSON_B64 }}
+          GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
+          GOOGLE_CREDENTIALS_PATH: .secrets/gmail_credentials.json
+          GOOGLE_TOKEN_PATH: .secrets/gmail_token.json
+          GOOGLE_REQUIRE_REFRESH_TOKEN: "true"
+        run: |
+          if [ -z "$GOOGLE_CREDENTIALS_JSON_B64" ] || [ -z "$GOOGLE_TOKEN_JSON_B64" ]; then
+            echo "Skipping Gmail OAuth validation because one or both Gmail OAuth secrets are missing."
+            exit 0
+          fi
+          npm run gmail:check
+
       - name: Check ADP credential inputs
         env:
           ADP_USERNAME: ${{ secrets.ADP_USERNAME }}
@@ -93,6 +121,7 @@ jobs:
           # Keep this matching the local successful run. A headed browser
           # needs xvfb-run on GitHub Actions because there is no real display.
           ADP_HEADLESS: "false"
+          ADP_NONINTERACTIVE: "true"
           ADP_INCOGNITO: "true"
           TZ: America/Vancouver
           ADP_TIMEZONE_ID: America/Vancouver
@@ -108,6 +137,11 @@ jobs:
           ADP_POST_LOGIN_TIMEOUT_MS: "120000"
           ADP_DEBUG: "true"
           ADP_TRACE: "true"
+          GOOGLE_CREDENTIALS_JSON_B64: ${{ secrets.GOOGLE_CREDENTIALS_JSON_B64 }}
+          GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
+          GOOGLE_CREDENTIALS_PATH: .secrets/gmail_credentials.json
+          GOOGLE_TOKEN_PATH: .secrets/gmail_token.json
+          GOOGLE_REQUIRE_REFRESH_TOKEN: "true"
           CALENDAR_TIMEZONE: America/Vancouver
           CALENDAR_ALARMS: 1440,180,60
         run: |

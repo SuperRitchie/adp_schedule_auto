@@ -71,7 +71,16 @@ Filling password...
 
 If ADP shows MFA/security verification, finish that manually in the browser window. The script will not bypass MFA.
 
-If you want Gmail-assisted MFA, install the Node dependencies, add `credentials.json` for a Gmail OAuth client, and let the script create `token.json` the first time it asks you to authorize access. You can override the Gmail search with `ADP_GMAIL_QUERY` if your ADP verification email subject or sender differs.
+If you want Gmail-assisted MFA, use a Google OAuth client JSON in `.secrets/gmail_credentials.json` and a token in `.secrets/gmail_token.json`. The script also supports `GOOGLE_CREDENTIALS_JSON_B64` and `GOOGLE_TOKEN_JSON_B64` for CI, and you can override the Gmail search with `ADP_GMAIL_QUERY` if your ADP verification email subject or sender differs.
+
+Useful commands:
+
+```bash
+npm run gmail:auth
+npm run gmail:check
+```
+
+`npm run gmail:auth` opens the Google consent flow and writes a refreshable token to `.secrets/gmail_token.json`. `npm run gmail:check` validates that the token can still refresh and reach Gmail.
 
 ## Schedule capture behavior
 
@@ -138,6 +147,8 @@ Add these secrets:
 | `ADP_PASSWORD`                          | Optional raw ADP password fallback if the base64 secret is not set. |
 | `GOOGLE_DRIVE_FOLDER_ID`                | The destination Google Drive folder ID.                             |
 | `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` | Base64-encoded Google service account JSON.                         |
+| `GOOGLE_CREDENTIALS_JSON_B64`           | Base64-encoded Gmail OAuth client JSON for CI.                      |
+| `GOOGLE_TOKEN_JSON_B64`                 | Base64-encoded Gmail OAuth token JSON for CI.                       |
 
 The workflow now passes credentials directly to the Node.js and Python processes through environment variables. It does **not** write ADP credentials into a temporary `.env` file during GitHub Actions. The script prefers `ADP_USERNAME_B64` / `ADP_PASSWORD_B64` when they exist, then falls back to `ADP_USERNAME` / `ADP_PASSWORD`.
 
@@ -163,6 +174,8 @@ PY
 Paste the copied value into the GitHub secret `ADP_PASSWORD_B64`.
 
 The workflow prints only safe credential diagnostics, such as value length and a SHA-256 prefix. It does not print the raw password.
+
+For Gmail OAuth in CI, the workflow recreates `.secrets/gmail_credentials.json` and `.secrets/gmail_token.json` from the base64 secrets before it starts ADP automation. It also runs `npm run gmail:check` so a missing `refresh_token` or an `invalid_grant` token gets caught early.
 
 ### Google Drive setup
 

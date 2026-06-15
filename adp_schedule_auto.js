@@ -29,8 +29,15 @@ const DEFAULT_WORK_FEATURES_URL = 'https://my.adp.com/#/time/myworkfeatures';
 
 // Scopes required for reading emails
 const SCOPES = ['https://www.googleapis.com/auth/gmail.readonly'];
-const TOKEN_PATH = path.join(__dirname, 'token.json');
-const CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
+const GOOGLE_SECRETS_DIR = path.resolve(envRaw('GOOGLE_SECRETS_DIR', '.secrets'));
+const GOOGLE_CREDENTIALS_PATH = path.resolve(
+  envRaw('GOOGLE_CREDENTIALS_PATH', envRaw('GMAIL_CREDENTIALS_PATH', path.join(GOOGLE_SECRETS_DIR, 'gmail_credentials.json')))
+);
+const GOOGLE_TOKEN_PATH = path.resolve(
+  envRaw('GOOGLE_TOKEN_PATH', envRaw('GMAIL_TOKEN_PATH', path.join(GOOGLE_SECRETS_DIR, 'gmail_token.json')))
+);
+const LEGACY_GOOGLE_CREDENTIALS_PATH = path.join(__dirname, 'credentials.json');
+const LEGACY_GOOGLE_TOKEN_PATH = path.join(__dirname, 'token.json');
 
 function loadEnvFiles() {
   // dotenv normally reads from the current working directory only. That breaks
@@ -131,6 +138,56 @@ function getGoogleApis() {
       `googleapis is required for Gmail-assisted MFA, but it is not installed. Run npm install in this repo or complete MFA manually. Original error: ${error.message}`
     );
   }
+}
+
+function googleRequireRefreshToken() {
+  return boolEnv('GOOGLE_REQUIRE_REFRESH_TOKEN', true);
+}
+
+function isInvalidGrantError(error) {
+  const text = [error?.message, error?.response?.data?.error, error?.response?.data?.error_description]
+    .filter(Boolean)
+    .join(' ');
+  return /invalid[_-]?grant|token has been expired or revoked|bad request/i.test(text);
+}
+
+function parseJsonText(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`${label} is not valid JSON: ${error.message}`);
+  }
+}
+
+async function writeJsonFile(filePath, text) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, text, { encoding: 'utf8', mode: 0o600 });
+}
+
+async function resolveGoogleJsonArtifact({ preferredPath, legacyPath, envName, label, required = true }) {
+  if (await fileExists(preferredPath)) {
+    return { path: preferredPath, source: 'file' };
+  }
+
+  if (await fileExists(legacyPath)) {
+    return { path: legacyPath, source: 'legacy-file' };
+  }
+
+  const encoded = envRaw(envName, '');
+  if (encoded) {
+    const decoded = decodeBase64Secret(encoded, envName);
+    parseJsonText(decoded, label);
+    await writeJsonFile(preferredPath, decoded);
+    return { path: preferredPath, source: envName };
+  }
+
+  if (!required) {
+    return { path: preferredPath, source: 'missing' };
+  }
+
+  throw new Error(
+    `${label} file was not found at ${preferredPath}. Provide ${envName}, create the file locally, or place it at ${legacyPath}.`
+  );
 }
 
 function boolEnv(name, fallback = false) {
@@ -592,10 +649,13 @@ async function attemptLogin(page) {
  * Authenticates with the Gmail API, prompting the user via CLI on the first run.
  */
 async function authorizeGmail() {
-  const content = await fs.readFile(CREDENTIALS_PATH, 'utf8').catch(() => {
-    throw new Error('Error loading client secret file. Please ensure credentials.json exists.');
+  const credentialsArtifact = await resolveGoogleJsonArtifact({
+    preferredPath: GOOGLE_CREDENTIALS_PATH,
+    legacyPath: LEGACY_GOOGLE_CREDENTIALS_PATH,
+    envName: 'GOOGLE_CREDENTIALS_JSON_B64',
+    label: 'google oauth client credentials',
   });
-  const credentials = JSON.parse(content);
+  const credentials = parseJsonText(await fs.readFile(credentialsArtifact.path, 'utf8'), 'google oauth client credentials');
   const clientConfig = credentials.installed || credentials.web || credentials.desktop;
 
   if (!clientConfig) {
@@ -618,12 +678,28 @@ Use a Google OAuth client JSON downloaded from Google Cloud Console, not a servi
 
   const googleClient = getGoogleApis();
   const oAuth2Client = new googleClient.auth.OAuth2(client_id, client_secret, redirect_uris[0]);
+  const tokenArtifact = await resolveGoogleJsonArtifact({
+    preferredPath: GOOGLE_TOKEN_PATH,
+    legacyPath: LEGACY_GOOGLE_TOKEN_PATH,
+    envName: 'GOOGLE_TOKEN_JSON_B64',
+    label: 'google oauth token',
+    required: false,
+  });
 
   try {
-    const token = await fs.readFile(TOKEN_PATH, 'utf8');
-    oAuth2Client.setCredentials(JSON.parse(token));
+    const tokenText = await fs.readFile(tokenArtifact.path, 'utf8');
+    const token = parseJsonText(tokenText, 'google oauth token');
+    if (googleRequireRefreshToken() && !token.refresh_token) {
+      throw new Error(
+        'google oauth token is missing refresh_token. Run `npm run gmail:auth` locally and replace GOOGLE_TOKEN_JSON_B64 or the token file.'
+      );
+    }
+    oAuth2Client.setCredentials(token);
   } catch (err) {
-    return await getNewToken(oAuth2Client);
+    if (err.code === 'ENOENT') {
+      return await getNewToken(oAuth2Client);
+    }
+    throw err;
   }
   return oAuth2Client;
 }
@@ -636,9 +712,14 @@ async function getNewToken(oAuth2Client) {
   console.log('Authorize this app by visiting this url:', authUrl);
   const code = await ask('Enter the code from that page here: ');
   const { tokens } = await oAuth2Client.getToken(code);
+  if (googleRequireRefreshToken() && !tokens.refresh_token) {
+    throw new Error(
+      'Google did not return a refresh_token. Revoke the app access in your Google account, confirm the consent screen is in production, and run `npm run gmail:auth` again.'
+    );
+  }
   oAuth2Client.setCredentials(tokens);
-  await fs.writeFile(TOKEN_PATH, JSON.stringify(tokens));
-  console.log('Token stored to', TOKEN_PATH);
+  await writeJsonFile(GOOGLE_TOKEN_PATH, JSON.stringify(tokens, null, 2));
+  console.log('Token stored to', GOOGLE_TOKEN_PATH);
   return oAuth2Client;
 }
 
@@ -654,29 +735,38 @@ async function fetchLatestAdpCode(auth) {
   console.log('Polling Gmail for the verification code...');
 
   for (let i = 0; i < maxAttempts; i++) {
-    const res = await gmail.users.messages.list({
-      userId: 'me',
-      q: query,
-      maxResults: 5,
-    });
+    try {
+      const res = await gmail.users.messages.list({
+        userId: 'me',
+        q: query,
+        maxResults: 5,
+      });
 
-    const messages = res.data.messages;
-    if (messages && messages.length > 0) {
-      for (const message of messages) {
-        const msg = await gmail.users.messages.get({
-          userId: 'me',
-          id: message.id,
-          format: 'full',
-        });
+      const messages = res.data.messages;
+      if (messages && messages.length > 0) {
+        for (const message of messages) {
+          const msg = await gmail.users.messages.get({
+            userId: 'me',
+            id: message.id,
+            format: 'full',
+          });
 
-        const code = extractAdpCodeFromMessage(msg);
-        if (code) {
-          console.log(`Successfully extracted ADP code: ${code}`);
-          return code;
+          const code = extractAdpCodeFromMessage(msg);
+          if (code) {
+            console.log(`Successfully extracted ADP code: ${code}`);
+            return code;
+          }
         }
       }
+    } catch (error) {
+      if (isInvalidGrantError(error)) {
+        throw new Error(
+          'Google Gmail authorization failed with invalid_grant. Run `npm run gmail:auth` locally, replace GOOGLE_TOKEN_JSON_B64 or the token file, and try again.'
+        );
+      }
+      throw error;
     }
-    
+
     // Wait 5 seconds before checking again
     await new Promise(resolve => setTimeout(resolve, 5000));
   }
