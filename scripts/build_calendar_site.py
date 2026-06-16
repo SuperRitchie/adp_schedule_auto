@@ -11,9 +11,9 @@ import argparse
 import html
 import json
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
-from urllib.parse import quote
 
 
 def clean_base_url(value: str) -> str:
@@ -29,6 +29,22 @@ def webcal_url(https_url: str) -> str:
     if https_url.startswith("http://"):
         return "webcal://" + https_url[len("http://") :]
     return https_url
+
+
+def google_calendar_url(webcal_feed_url: str) -> str:
+    """Return a Google Calendar subscription URL.
+
+    Google Calendar's cid parameter should point at the webcal:// feed, not the
+    https:// feed. Keeping it unescaped also matches the share format Google
+    accepts in practice, e.g.
+    https://calendar.google.com/calendar/u/0/r?cid=webcal://example.com/feed.ics
+    """
+    return "https://calendar.google.com/calendar/u/0/r?cid=" + webcal_feed_url
+
+
+def generated_time_label() -> str:
+    generated = datetime.now(ZoneInfo("America/Vancouver")).replace(microsecond=0)
+    return generated.strftime("%Y-%m-%d %I:%M:%S %p %Z (Vancouver time)")
 
 
 def esc(value: object) -> str:
@@ -141,7 +157,7 @@ def render_employee_page(item: dict, generated_at: str) -> str:
     slug = esc(item["employee_slug"])
     https_url = esc(item["https_url"])
     webcal = esc(item["webcal_url"])
-    google_add = "https://calendar.google.com/calendar/r?cid=" + quote(item["https_url"], safe="")
+    google_add = google_calendar_url(item["webcal_url"])
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -194,7 +210,7 @@ def build_site(source_dir: Path, out_dir: Path, base_url: str) -> None:
 
     raw_entries = read_json(index_path, [])
     parse_summary = read_json(source_dir / "parse_summary.json", {})
-    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    generated_at = generated_time_label()
 
     if out_dir.exists():
         shutil.rmtree(out_dir)
