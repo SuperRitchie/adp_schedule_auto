@@ -167,6 +167,42 @@ jobs:
             --source-dir parsed_schedule \
             --folder-id "$GOOGLE_DRIVE_FOLDER_ID"
 
+      - name: Build subscribable calendar website files
+        env:
+          CALENDAR_BASE_URL: https://ritchiek.tech/adp-calendars
+        run: |
+          python3 scripts/build_calendar_site.py \
+            --source-dir parsed_schedule \
+            --out-dir calendar_site \
+            --base-url "$CALENDAR_BASE_URL"
+
+      - name: Check out website repository
+        uses: actions/checkout@v4
+        with:
+          repository: SuperRitchie/SuperRitchie.github.io
+          token: ${{ secrets.WEBSITE_REPO_TOKEN }}
+          path: website
+
+      - name: Publish subscribable calendars to ritchiek.tech
+        env:
+          CALENDAR_WEBSITE_SUBDIR: adp-calendars
+        run: |
+          set -euo pipefail
+          rm -rf "website/$CALENDAR_WEBSITE_SUBDIR"
+          mkdir -p "website/$CALENDAR_WEBSITE_SUBDIR"
+          cp -R calendar_site/. "website/$CALENDAR_WEBSITE_SUBDIR/"
+
+          git -C website config user.name "github-actions[bot]"
+          git -C website config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C website add "$CALENDAR_WEBSITE_SUBDIR"
+
+          if git -C website diff --cached --quiet; then
+            echo "No website calendar changes to publish."
+          else
+            git -C website commit -m "Update ADP schedule calendars"
+            git -C website push
+          fi
+
       - name: Upload debug artifacts if the run fails
         if: failure()
         uses: actions/upload-artifact@v4

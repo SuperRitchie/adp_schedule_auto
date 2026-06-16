@@ -44,3 +44,7 @@ adp_schedule_auto.zip
 .secrets/
 credentials.json
 token.json
+
+# Generated GitHub Pages calendar site / external website checkout
+calendar_site/
+website/

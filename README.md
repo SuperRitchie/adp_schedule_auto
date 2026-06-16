@@ -250,3 +250,72 @@ base64 -i .secrets/google_drive_token.json | tr -d '\\n' | pbcopy
 ```
 
 Keep the old `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` only if your destination folder is inside a real Google Workspace Shared Drive.
+
+## Subscribable calendar website on ritchiek.tech
+
+The workflow can also publish the generated `.ics` calendars to your GitHub Pages website repo so employees can subscribe from stable URLs.
+
+Published URLs will look like:
+
+```text
+https://ritchiek.tech/adp-calendars/
+https://ritchiek.tech/adp-calendars/u/my-schedule/
+https://ritchiek.tech/adp-calendars/calendars/my-schedule.ics
+webcal://ritchiek.tech/adp-calendars/calendars/my-schedule.ics
+```
+
+### Required secret for publishing to your website repo
+
+Because this workflow runs from the `adp_schedule_auto` repo but publishes into `SuperRitchie/SuperRitchie.github.io`, add one extra GitHub secret to the `adp_schedule_auto` repo:
+
+| Secret name | Value |
+| --- | --- |
+| `WEBSITE_REPO_TOKEN` | A fine-grained GitHub token with **Contents: Read and write** access to `SuperRitchie/SuperRitchie.github.io`. |
+
+A normal `GITHUB_TOKEN` usually cannot push to a different repository, so this separate token is needed.
+
+### What gets published
+
+After the ADP capture and parser run, the workflow runs:
+
+```bash
+python3 scripts/build_calendar_site.py \
+  --source-dir parsed_schedule \
+  --out-dir calendar_site \
+  --base-url https://ritchiek.tech/adp-calendars
+```
+
+Then it copies `calendar_site/` into the website repo under:
+
+```text
+adp-calendars/
+```
+
+The generated website includes:
+
+```text
+adp-calendars/index.html
+adp-calendars/calendar_index.json
+adp-calendars/calendars/<employee-slug>.ics
+adp-calendars/u/<employee-slug>/index.html
+adp-calendars/robots.txt
+```
+
+Each employee gets a stable subscription page and a stable `.ics` URL. When new schedules come out, the workflow replaces the file with the same name, so calendar subscriptions keep pointing at the same URL.
+
+### Local test
+
+After you have a `parsed_schedule/` folder locally, test the generated website folder with:
+
+```bash
+python3 scripts/build_calendar_site.py \
+  --source-dir parsed_schedule \
+  --out-dir calendar_site \
+  --base-url https://ritchiek.tech/adp-calendars
+```
+
+Then open:
+
+```text
+calendar_site/index.html
+```
