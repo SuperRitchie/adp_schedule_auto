@@ -42,6 +42,16 @@ def google_calendar_url(webcal_feed_url: str) -> str:
     return "https://calendar.google.com/calendar/u/0/r?cid=" + webcal_feed_url
 
 
+def outlook_calendar_url() -> str:
+    """Return the Outlook web calendar page.
+
+    Outlook does not provide a dependable public one-click subscribe URL for an
+    arbitrary external ICS feed, so the site opens Outlook Calendar and shows
+    the user the exact ICS URL to paste under Add calendar -> Subscribe from web.
+    """
+    return "https://outlook.office.com/calendar/addcalendar"
+
+
 def generated_time_label() -> str:
     generated = datetime.now(ZoneInfo("America/Vancouver")).replace(microsecond=0)
     return generated.strftime("%Y-%m-%d %I:%M:%S %p %Z (Vancouver time)")
@@ -78,6 +88,7 @@ def render_home_page(entries: list[dict], base_url: str, generated_at: str, pars
               <td><code>{slug}</code></td>
               <td>{shift_count}</td>
               <td><a href="{webcal}">Subscribe</a></td>
+              <td><a href="{outlook_calendar_url()}" target="_blank" rel="noopener">Outlook</a></td>
               <td><a href="{https_url}">ICS</a></td>
             </tr>
             """
@@ -121,7 +132,8 @@ def render_home_page(entries: list[dict], base_url: str, generated_at: str, pars
 
   <div class="cards">
     <div class="card"><strong>iPhone / Apple Calendar</strong><br>Open an employee page and tap <em>Subscribe</em>.</div>
-    <div class="card"><strong>Google Calendar</strong><br>Copy the HTTPS ICS URL, then add it from <em>Other calendars → From URL</em>.</div>
+    <div class="card"><strong>Google Calendar</strong><br>Open an employee page and tap <em>Add to Google Calendar</em>.</div>
+    <div class="card"><strong>Outlook Calendar</strong><br>Open an employee page, tap <em>Add to Outlook Calendar</em>, then paste the HTTPS ICS URL under <em>Add calendar → Subscribe from web</em>.</div>
     <div class="card"><strong>Direct feeds</strong><br>Each employee has a stable <code>.ics</code> URL that gets replaced when the workflow runs.</div>
   </div>
 
@@ -130,7 +142,7 @@ def render_home_page(entries: list[dict], base_url: str, generated_at: str, pars
 
   <table id="calendar-table">
     <thead>
-      <tr><th>Name</th><th>Slug</th><th>Shifts</th><th>Subscribe</th><th>ICS URL</th></tr>
+      <tr><th>Name</th><th>Slug</th><th>Shifts</th><th>Subscribe</th><th>Outlook</th><th>ICS URL</th></tr>
     </thead>
     <tbody>
       {''.join(rows)}
@@ -158,6 +170,7 @@ def render_employee_page(item: dict, generated_at: str) -> str:
     https_url = esc(item["https_url"])
     webcal = esc(item["webcal_url"])
     google_add = google_calendar_url(item["webcal_url"])
+    outlook_add = outlook_calendar_url()
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -168,9 +181,11 @@ def render_employee_page(item: dict, generated_at: str) -> str:
     :root {{ color-scheme: light dark; }}
     body {{ font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; line-height: 1.5; }}
     main {{ max-width: 760px; margin: 0 auto; }}
-    .button {{ display: inline-block; margin: 0.35rem 0.35rem 0.35rem 0; padding: 0.75rem 1rem; border-radius: 0.6rem; background: #0969da; color: white; text-decoration: none; }}
+    .button {{ display: inline-block; margin: 0.35rem 0.35rem 0.35rem 0; padding: 0.75rem 1rem; border-radius: 0.6rem; background: #0969da; color: white; text-decoration: none; border: 0; font: inherit; cursor: pointer; }}
+    .button.secondary {{ background: #57606a; }}
     code {{ overflow-wrap: anywhere; }}
     .muted {{ color: #666; }}
+    .steps {{ padding-left: 1.25rem; }}
   </style>
 </head>
 <body>
@@ -182,16 +197,36 @@ def render_employee_page(item: dict, generated_at: str) -> str:
   <p>
     <a class="button" href="{webcal}">Subscribe with Apple Calendar</a>
     <a class="button" href="{esc(google_add)}">Add to Google Calendar</a>
-    <a class="button" href="{https_url}">Download / copy ICS URL</a>
+    <a class="button" href="{esc(outlook_add)}" target="_blank" rel="noopener">Add to Outlook Calendar</a>
+    <button class="button secondary" type="button" onclick="copyIcsUrl()">Copy ICS URL</button>
+    <a class="button secondary" href="{https_url}">Download ICS</a>
   </p>
 
   <h2>Subscription URL</h2>
   <p>Use this HTTPS URL in Google Calendar, Outlook, or any calendar app that asks for a calendar URL:</p>
-  <p><code>{https_url}</code></p>
+  <p><code id="ics-url">{https_url}</code></p>
+
+  <h2>Outlook Calendar</h2>
+  <ol class="steps">
+    <li>Tap <strong>Copy ICS URL</strong>.</li>
+    <li>Tap <strong>Add to Outlook Calendar</strong>.</li>
+    <li>In Outlook, choose <strong>Add calendar → Subscribe from web</strong>, paste the URL, then save.</li>
+  </ol>
 
   <h2>Apple Calendar / iPhone URL</h2>
   <p><code>{webcal}</code></p>
 </main>
+<script>
+async function copyIcsUrl() {{
+  const value = document.getElementById('ics-url').textContent.trim();
+  try {{
+    await navigator.clipboard.writeText(value);
+    alert('Copied ICS URL. In Outlook, use Add calendar → Subscribe from web.');
+  }} catch (error) {{
+    window.prompt('Copy this ICS URL:', value);
+  }}
+}}
+</script>
 </body>
 </html>
 """
