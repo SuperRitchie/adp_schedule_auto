@@ -220,3 +220,33 @@ The debug artifacts can contain login page details and employee schedule data, s
 ### Important MFA note
 
 The workflow runs headless. If ADP requires MFA every time, GitHub Actions cannot complete that step automatically. In that case, either run the script locally, use a self-hosted runner where you can complete MFA, or keep using the local browser flow.
+
+
+## Google Drive upload auth
+
+For a normal personal **My Drive** folder, use Google Drive OAuth credentials instead of a service account. Google service accounts do not have My Drive storage quota, so sharing a personal Drive folder with a service account can fail with `Service Accounts do not have storage quota`.
+
+Create these GitHub repository secrets:
+
+```text
+GOOGLE_DRIVE_FOLDER_ID
+GOOGLE_DRIVE_CREDENTIALS_JSON_B64
+GOOGLE_DRIVE_TOKEN_JSON_B64
+```
+
+Local setup:
+
+```bash
+mkdir -p .secrets
+# Save your Google Cloud OAuth client JSON as:
+# .secrets/google_drive_credentials.json
+python3 scripts/auth_google_drive_oauth.py   --credentials .secrets/google_drive_credentials.json   --token .secrets/google_drive_token.json
+
+base64 -i .secrets/google_drive_credentials.json | tr -d '\\n' | pbcopy
+# paste into GOOGLE_DRIVE_CREDENTIALS_JSON_B64
+
+base64 -i .secrets/google_drive_token.json | tr -d '\\n' | pbcopy
+# paste into GOOGLE_DRIVE_TOKEN_JSON_B64
+```
+
+Keep the old `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` only if your destination folder is inside a real Google Workspace Shared Drive.
