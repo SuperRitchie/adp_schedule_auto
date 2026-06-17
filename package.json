@@ -10,7 +10,7 @@
     "gmail:check": "node scripts/check_gmail_token.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.7",
+    "dotenv": "^17.0.0",
     "googleapis": "^156.0.0",
     "playwright": "^1.49.1"
   }
