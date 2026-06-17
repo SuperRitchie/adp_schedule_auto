@@ -1,0 +1,26 @@
+version: 2
+updates:
+
+# Node.js dependencies: package.json / package-lock.json
+
+* package-ecosystem: "npm"
+  directory: "/"
+  schedule:
+  interval: "weekly"
+  open-pull-requests-limit: 5
+
+# Python dependencies: requirements.txt
+
+* package-ecosystem: "pip"
+  directory: "/"
+  schedule:
+  interval: "weekly"
+  open-pull-requests-limit: 5
+
+# GitHub Actions workflow versions
+
+* package-ecosystem: "github-actions"
+  directory: "/"
+  schedule:
+  interval: "weekly"
+  open-pull-requests-limit: 5
