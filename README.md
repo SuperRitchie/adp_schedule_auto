@@ -303,6 +303,25 @@ adp-calendars/robots.txt
 
 Each employee gets a stable subscription page and a stable `.ics` URL. When new schedules come out, the workflow replaces the file with the same name, so calendar subscriptions keep pointing at the same URL.
 
+### Calendar refresh hints
+
+Generated `.ics` files include subscription refresh hints:
+
+```text
+REFRESH-INTERVAL;VALUE=DURATION:PT1H
+X-PUBLISHED-TTL:PT1H
+LAST-MODIFIED:<current publish time>
+SEQUENCE:<current publish timestamp>
+```
+
+The default requested refresh interval is 60 minutes. You can adjust it with:
+
+```env
+CALENDAR_REFRESH_MINUTES=60
+```
+
+The generated static site also writes a Cloudflare Pages `_headers` file that asks caches to revalidate `.ics` files. GitHub Pages ignores `_headers`, so Google Calendar may still refresh subscribed calendars on Google's own schedule.
+
 ### Local test
 
 After you have a `parsed_schedule/` folder locally, test the generated website folder with:

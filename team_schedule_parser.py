@@ -363,8 +363,31 @@ def alarm_trigger(minutes: int) -> str:
     return f'-PT{mins}M'
 
 
-def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minutes: list[int]) -> str:
-    now = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+def ics_refresh_minutes(value: str) -> int:
+    try:
+        minutes = int(str(value or '').strip())
+    except ValueError:
+        minutes = 60
+    return max(5, minutes)
+
+
+def ics_refresh_duration(minutes: int) -> str:
+    minutes = max(5, minutes)
+    if minutes % 1440 == 0:
+        return f'P{minutes // 1440}D'
+    hours, mins = divmod(minutes, 60)
+    if hours and mins:
+        return f'PT{hours}H{mins}M'
+    if hours:
+        return f'PT{hours}H'
+    return f'PT{mins}M'
+
+
+def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minutes: list[int], refresh_minutes: int = 60) -> str:
+    generated_at = datetime.now(timezone.utc)
+    now = generated_at.strftime('%Y%m%dT%H%M%SZ')
+    sequence = int(generated_at.timestamp())
+    refresh_duration = ics_refresh_duration(refresh_minutes)
     name = employee['employee_name']
     lines = [
         'BEGIN:VCALENDAR',
@@ -373,7 +396,11 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
         'CALSCALE:GREGORIAN',
         'METHOD:PUBLISH',
         f'X-WR-CALNAME:{ics_escape(name)} Schedule',
+        f'NAME:{ics_escape(name)} Schedule',
+        f'X-WR-RELCALID:{ics_escape(employee["employee_slug"])}@ritchiek-tech-adp-calendars',
         f'X-WR-TIMEZONE:{ics_escape(tzid)}',
+        f'REFRESH-INTERVAL;VALUE=DURATION:{refresh_duration}',
+        f'X-PUBLISHED-TTL:{refresh_duration}',
     ]
 
     for shift in employee['shifts']:
@@ -392,6 +419,8 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
             'BEGIN:VEVENT',
             f'UID:{ics_escape(uid_key)}@adp-schedule-parser',
             f'DTSTAMP:{now}',
+            f'LAST-MODIFIED:{now}',
+            f'SEQUENCE:{sequence}',
             f'DTSTART;TZID={ics_escape(tzid)}:{ics_datetime(shift["start_datetime"])}',
             f'DTEND;TZID={ics_escape(tzid)}:{ics_datetime(shift["end_datetime"])}',
             f'SUMMARY:{ics_escape(summary)}',
@@ -413,7 +442,7 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
     return '\r\n'.join(lines) + '\r\n'
 
 
-def write_employee_calendars(employees: list[dict], out_dir: Path, *, tzid: str, location: str, alarm_minutes: list[int]) -> list[dict]:
+def write_employee_calendars(employees: list[dict], out_dir: Path, *, tzid: str, location: str, alarm_minutes: list[int], refresh_minutes: int = 60) -> list[dict]:
     calendar_dir = out_dir / 'calendars'
     calendar_dir.mkdir(parents=True, exist_ok=True)
     index: list[dict] = []
@@ -421,7 +450,7 @@ def write_employee_calendars(employees: list[dict], out_dir: Path, *, tzid: str,
         filename = f"{employee['employee_slug']}.ics"
         rel_path = f"calendars/{filename}"
         (calendar_dir / filename).write_text(
-            build_employee_ics(employee, tzid=tzid, location=location, alarm_minutes=alarm_minutes),
+            build_employee_ics(employee, tzid=tzid, location=location, alarm_minutes=alarm_minutes, refresh_minutes=refresh_minutes),
             encoding='utf-8',
         )
         index.append({
@@ -434,7 +463,7 @@ def write_employee_calendars(employees: list[dict], out_dir: Path, *, tzid: str,
     return index
 
 
-def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Path, *, tzid: str, location: str, alarm_minutes: list[int]) -> None:
+def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Path, *, tzid: str, location: str, alarm_minutes: list[int], refresh_minutes: int = 60) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     records_as_dicts = [asdict(rec) for rec in records]
 
@@ -453,7 +482,7 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
         json.dumps(employees, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    calendar_index = write_employee_calendars(employees, out_dir, tzid=tzid, location=location, alarm_minutes=alarm_minutes)
+    calendar_index = write_employee_calendars(employees, out_dir, tzid=tzid, location=location, alarm_minutes=alarm_minutes, refresh_minutes=refresh_minutes)
     (out_dir / "calendar_index.json").write_text(
         json.dumps(calendar_index, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -466,6 +495,7 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
         "calendar_time_zone": tzid,
         "calendar_location": location,
         "calendar_alarm_minutes_before_shift": alarm_minutes,
+        "calendar_refresh_minutes": refresh_minutes,
         "output_files": ["shifts.csv", "shifts.json", "employees.json", "calendar_index.json", "calendars/*.ics", "parse_summary.json"],
     }
     (out_dir / "parse_summary.json").write_text(
@@ -481,6 +511,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timezone", default="America/Vancouver", help="TZID for generated .ics calendars.")
     parser.add_argument("--calendar-location", default="", help="Optional LOCATION value for generated .ics events.")
     parser.add_argument("--alarms", default="1440,180,60", help="Comma-separated reminder minutes before shifts, e.g. 1440,180,60. Use empty string for no alarms.")
+    parser.add_argument("--refresh-minutes", default="60", help="Requested refresh interval for subscribed calendars. Default: 60 minutes.")
     return parser.parse_args()
 
 
@@ -503,6 +534,7 @@ def main() -> None:
         tzid=args.timezone,
         location=args.calendar_location,
         alarm_minutes=parse_alarm_minutes(args.alarms),
+        refresh_minutes=ics_refresh_minutes(args.refresh_minutes),
     )
 
     print(f"Parsed {len(all_records)} shifts for {len({r.employee_slug for r in all_records})} employees with shifts.")

@@ -72,6 +72,35 @@ def write_text(path: Path, value: str) -> None:
     path.write_text(value, encoding="utf-8")
 
 
+def render_cloudflare_headers() -> str:
+    """Return optional Cloudflare Pages headers for fresher calendar feeds.
+
+    GitHub Pages ignores this file, but Cloudflare Pages Direct Upload reads it.
+    These headers ask browsers/proxies to revalidate the ICS and JSON files
+    instead of serving stale cached copies. Calendar apps such as Google Calendar
+    may still refresh on their own schedule.
+    """
+    return """/calendars/*.ics
+  Content-Type: text/calendar; charset=utf-8
+  Cache-Control: no-cache, max-age=0, must-revalidate
+  X-Content-Type-Options: nosniff
+
+/calendar_index.json
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: no-cache, max-age=0, must-revalidate
+
+/*.json
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: no-cache, max-age=0, must-revalidate
+
+/u/*
+  Cache-Control: no-cache, max-age=0, must-revalidate
+
+/
+  Cache-Control: no-cache, max-age=0, must-revalidate
+"""
+
+
 def render_home_page(entries: list[dict], base_url: str, generated_at: str, parse_summary: dict) -> str:
     rows = []
     for item in entries:
@@ -276,6 +305,7 @@ def build_site(source_dir: Path, out_dir: Path, base_url: str) -> None:
     write_text(out_dir / "calendar_index.json", json.dumps(entries, indent=2, ensure_ascii=False) + "\n")
     write_text(out_dir / ".nojekyll", "")
     write_text(out_dir / "robots.txt", "User-agent: *\nDisallow: /\n")
+    write_text(out_dir / "_headers", render_cloudflare_headers())
     write_text(
         out_dir / "README.txt",
         f"MEC subscribable calendar feeds\nGenerated: {generated_at}\nBase URL: {base_url}\nCalendar count: {len(entries)}\n",

@@ -144,6 +144,7 @@ jobs:
           GOOGLE_REQUIRE_REFRESH_TOKEN: "true"
           CALENDAR_TIMEZONE: America/Vancouver
           CALENDAR_ALARMS: 1440,180,60
+          CALENDAR_REFRESH_MINUTES: "60"
         run: |
           if [ "${ADP_HEADLESS}" = "false" ]; then
             echo "Running headed Chromium under xvfb-run to match local headed/incognito conditions."

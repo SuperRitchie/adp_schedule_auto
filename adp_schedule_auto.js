@@ -1346,7 +1346,8 @@ function runParser(htmlPaths, outDir) {
       '--out-dir', outDir,
       '--timezone', env('CALENDAR_TIMEZONE', 'America/Vancouver'),
       '--calendar-location', env('CALENDAR_LOCATION', ''),
-      '--alarms', env('CALENDAR_ALARMS', '1440,180,60')
+      '--alarms', env('CALENDAR_ALARMS', '1440,180,60'),
+      '--refresh-minutes', env('CALENDAR_REFRESH_MINUTES', '60')
     ];
     console.log(`Running parser: ${python} ${args.map(a => JSON.stringify(a)).join(' ')}`);
     const child = spawn(python, args, { stdio: 'inherit', cwd: __dirname });
