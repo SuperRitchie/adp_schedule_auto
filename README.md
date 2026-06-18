@@ -251,26 +251,26 @@ base64 -i .secrets/google_drive_token.json | tr -d '\\n' | pbcopy
 
 Keep the old `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64` only if your destination folder is inside a real Google Workspace Shared Drive.
 
-## Subscribable calendar website on ritchiek.tech
+## Subscribable calendar website (optional)
 
-The workflow can also publish the generated `.ics` calendars to your GitHub Pages website repo so employees can subscribe from stable URLs.
+The workflow can also publish the generated `.ics` calendars to a website (for example, a GitHub Pages site) so employees can subscribe from stable URLs.
 
 Published URLs will look like:
 
 ```text
-https://ritchiek.tech/adp-calendars/
-https://ritchiek.tech/adp-calendars/u/my-schedule/
-https://ritchiek.tech/adp-calendars/calendars/my-schedule.ics
-webcal://ritchiek.tech/adp-calendars/calendars/my-schedule.ics
+https://your-site.example/adp-calendars/
+https://your-site.example/adp-calendars/u/my-schedule/
+https://your-site.example/adp-calendars/calendars/my-schedule.ics
+webcal://your-site.example/adp-calendars/calendars/my-schedule.ics
 ```
 
 ### Required secret for publishing to your website repo
 
-Because this workflow runs from the `adp_schedule_auto` repo but publishes into `SuperRitchie/SuperRitchie.github.io`, add one extra GitHub secret to the `adp_schedule_auto` repo:
+Because this workflow runs from the `adp_schedule_auto` repo but publishes into a separate website repository (for example `username/username.github.io`), add one extra GitHub secret to the `adp_schedule_auto` repo:
 
 | Secret name | Value |
 | --- | --- |
-| `WEBSITE_REPO_TOKEN` | A fine-grained GitHub token with **Contents: Read and write** access to `SuperRitchie/SuperRitchie.github.io`. |
+| `WEBSITE_REPO_TOKEN` | A fine-grained GitHub token with **Contents: Read and write** access to the website repository. |
 
 A normal `GITHUB_TOKEN` usually cannot push to a different repository, so this separate token is needed.
 
@@ -282,7 +282,7 @@ After the ADP capture and parser run, the workflow runs:
 python3 scripts/build_calendar_site.py \
   --source-dir parsed_schedule \
   --out-dir calendar_site \
-  --base-url https://ritchiek.tech/adp-calendars
+  --base-url https://your-site.example/adp-calendars
 ```
 
 Then it copies `calendar_site/` into the website repo under:
@@ -330,7 +330,7 @@ After you have a `parsed_schedule/` folder locally, test the generated website f
 python3 scripts/build_calendar_site.py \
   --source-dir parsed_schedule \
   --out-dir calendar_site \
-  --base-url https://ritchiek.tech/adp-calendars
+  --base-url https://your-site.example/adp-calendars
 ```
 
 Then open:
