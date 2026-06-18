@@ -221,7 +221,6 @@ The debug artifacts can contain login page details and employee schedule data, s
 
 The workflow runs headless. If ADP requires MFA every time, GitHub Actions cannot complete that step automatically. In that case, either run the script locally, use a self-hosted runner where you can complete MFA, or keep using the local browser flow.
 
-
 ## Google Drive upload auth
 
 For a normal personal **My Drive** folder, use Google Drive OAuth credentials instead of a service account. Google service accounts do not have My Drive storage quota, so sharing a personal Drive folder with a service account can fail with `Service Accounts do not have storage quota`.
@@ -268,8 +267,8 @@ webcal://your-site.example/adp-calendars/calendars/my-schedule.ics
 
 Because this workflow runs from the `adp_schedule_auto` repo but publishes into a separate website repository (for example `username/username.github.io`), add one extra GitHub secret to the `adp_schedule_auto` repo:
 
-| Secret name | Value |
-| --- | --- |
+| Secret name          | Value                                                                                           |
+| -------------------- | ----------------------------------------------------------------------------------------------- |
 | `WEBSITE_REPO_TOKEN` | A fine-grained GitHub token with **Contents: Read and write** access to the website repository. |
 
 A normal `GITHUB_TOKEN` usually cannot push to a different repository, so this separate token is needed.
