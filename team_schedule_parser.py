@@ -40,8 +40,8 @@ SHIFT_RE = re.compile(
     re.IGNORECASE,
 )
 DAY_COL_RE = re.compile(r"^day-(\d)$")
-SEGMENT_RE = re.compile(
-    r"^\s*\d+\.\s*"
+DETAIL_TIME_RE = re.compile(
+    r"^\s*(?:(?P<number>\d+)\.\s*)?"
     r"(?P<start>\d{1,2}:\d{2}\s*[AP]M)\s*-\s*"
     r"(?P<end>\d{1,2}:\d{2}\s*[AP]M)"
     r"(?:\s*\[(?P<hours>\d+(?:\.\d+)?)\])?"
@@ -60,6 +60,7 @@ SHIFT_TITLE_LIBRARY = (
     "Cycling Accessories",
     "Footwear",
     "Greeter",
+    "Hardgoods",
     "Lunch Cover",
     "MSD",
     "Packs",
@@ -68,9 +69,11 @@ SHIFT_TITLE_LIBRARY = (
     "Retail VM",
     "Snowsports",
     "Tents",
+    "Training",
     "VSPRO",
     "Watersports",
     "Break",
+    "SFS",
 )
 
 GENERIC_SHIFT_TITLES = {"Retail Floor", "Retail Frontline"}
@@ -150,20 +153,34 @@ def parse_shift_detail_segments(shift_detail: str) -> list[dict]:
     index = 0
     while index < len(lines):
         line = lines[index]
-        match = SEGMENT_RE.match(line)
+        match = DETAIL_TIME_RE.match(line)
         if not match:
             index += 1
             continue
 
+        is_numbered_segment = bool(match.group("number"))
         kind = clean_text(match.group("kind") or "")
         hours_text = match.group("hours")
-        title = "Break" if kind.lower() == "break" else ""
         next_index = index + 1
-        if next_index < len(lines) and not SEGMENT_RE.match(lines[next_index]):
+
+        # the first unnumbered time line in a multi-segment popup is the total shift header
+        # example: employee name, 11:00 AM - 7:00 PM [8.00], 1. 11:00 AM - ...
+        next_match = DETAIL_TIME_RE.match(lines[next_index]) if next_index < len(lines) else None
+        if not is_numbered_segment and not kind and next_match and next_match.group("number"):
+            index += 1
+            continue
+
+        title = "Break" if kind.lower() == "break" else ""
+        if next_index < len(lines) and not DETAIL_TIME_RE.match(lines[next_index]):
             next_title = match_shift_title(lines[next_index])
             if next_title:
                 title = next_title
                 next_index += 1
+
+        # ignore the overall popup header when there is no department/title attached
+        if not is_numbered_segment and not kind and not title:
+            index += 1
+            continue
 
         segments.append(
             {
@@ -223,6 +240,10 @@ def slugify_name(name: str) -> str:
     ascii_text = ascii_text.replace("'", "")
     ascii_text = re.sub(r"[^a-z0-9]+", "-", ascii_text).strip("-")
     return ascii_text or "unknown-employee"
+
+
+def is_pinned_non_employee_row(employee_name: str) -> bool:
+    return clean_text(employee_name).lower() in {"my schedule"}
 
 
 def parse_employee_id(name_cell: Tag | None) -> str:
@@ -394,7 +415,7 @@ def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
         name_cell = row.select_one('[col-id="name"]')
         name_el = name_cell.select_one(".location-schedule-employee-cell__name") if name_cell else None
         employee_name = clean_text(name_el.get_text(" ", strip=True)) if name_el else ""
-        if not employee_name:
+        if not employee_name or is_pinned_non_employee_row(employee_name):
             continue
 
         rendered_employee_names.append(employee_name)

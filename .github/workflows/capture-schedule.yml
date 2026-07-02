@@ -196,26 +196,62 @@ jobs:
             --alarms "$CALENDAR_ALARMS" \
             --refresh-minutes "$CALENDAR_REFRESH_MINUTES"
 
-      - name: Check full shift breakdown coverage
+      - name: Check full clean shift coverage
         run: |
           set -euo pipefail
           find captures -name "*.metadata.json" -print -exec grep -n "captured_shift_detail_count" {} \;
           find captures -name "*.metadata.json" -print -exec grep -n "shift_detail_miss_count" {} \;
           python3 - <<'PY'
+          import json
           from pathlib import Path
 
-          matches = []
-          for path in Path("parsed_schedule/calendars").glob("*.ics"):
-              text = path.read_text(encoding="utf-8", errors="ignore")
-              if "Shift breakdown" in text:
-                  matches.append(str(path))
+          summary_path = Path("parsed_schedule/parse_summary.json")
+          summary = json.loads(summary_path.read_text(encoding="utf-8"))
 
-          print("calendar files with shift breakdown:", len(matches))
-          for item in matches[:20]:
+          total = int(summary.get("total_shift_count") or 0)
+          with_detail = int(summary.get("shifts_with_detail_count") or 0)
+          missing = int(summary.get("shifts_missing_detail_count") or 0)
+          with_clean_segments = int(summary.get("shifts_with_clean_segments_count") or 0)
+
+          print("total shifts:", total)
+          print("shifts with detail:", with_detail)
+          print("shifts missing detail:", missing)
+          print("shifts with clean segments:", with_clean_segments)
+
+          if total <= 0:
+              raise SystemExit("no shifts were parsed")
+          if missing != 0 or with_detail != total:
+              raise SystemExit(
+                  f"shift breakdown coverage incomplete: {with_detail}/{total} with detail, {missing} missing"
+              )
+
+          calendar_dir = Path("parsed_schedule/calendars")
+          calendar_files = sorted(calendar_dir.glob("*.ics"))
+          if not calendar_files:
+              raise SystemExit("no calendar files were generated")
+          if (calendar_dir / "my-schedule.ics").exists():
+              raise SystemExit("pinned My Schedule row leaked into public calendars")
+
+          clean_description_matches = []
+          raw_breakdown_matches = []
+          for path in calendar_files:
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              if "DESCRIPTION:Schedule:" in text:
+                  clean_description_matches.append(str(path))
+              if "Shift breakdown" in text:
+                  raw_breakdown_matches.append(str(path))
+
+          print("calendar files with clean Schedule descriptions:", len(clean_description_matches))
+          for item in clean_description_matches[:20]:
               print(item)
 
-          if not matches:
-              raise SystemExit("no calendar descriptions contained Shift breakdown")
+          if not clean_description_matches:
+              raise SystemExit("no calendar descriptions contained cleaned Schedule text")
+          if raw_breakdown_matches:
+              print("raw Shift breakdown text remains in these files:")
+              for item in raw_breakdown_matches[:20]:
+                  print(item)
+              raise SystemExit("calendar descriptions still contain raw Shift breakdown text")
           PY
 
       - name: Upload parsed schedule outputs to Google Drive
