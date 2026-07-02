@@ -1153,7 +1153,13 @@ async function collectVirtualGridRows(page) {
     }
 
     function rowPrimaryJob(row) {
-      return cleanText(row.querySelector('[col-id="primaryJob"]')?.textContent || '');
+      return cleanText(
+        row.querySelector('[col-id="primaryJob"] primary-job-cell span')?.textContent
+        || row.querySelector('[col-id="primaryJob"] .ag-cell-text > span')?.textContent
+        || row.querySelector('[col-id="primaryJob"] .ag-cell-text')?.childNodes?.[0]?.textContent
+        || row.querySelector('[col-id="primaryJob"]')?.textContent
+        || ''
+      );
     }
 
     function rowSortIndex(row) {
@@ -1382,6 +1388,45 @@ function shiftDetailEnabled() {
   return boolEnv('ADP_CAPTURE_SHIFT_DETAILS', false);
 }
 
+async function resetScheduleGridToTop(page, waitMs = Number(env('ADP_SCROLL_DELAY_MS', '1000'))) {
+  await page.evaluate(() => {
+    function scoreScroller(el) {
+      if (!el) return -1;
+      const rect = el.getBoundingClientRect();
+      const overflow = Math.max(0, el.scrollHeight - el.clientHeight);
+      if (overflow < 20 || rect.width < 300 || rect.height < 150) return -1;
+      const className = String(el.className || '');
+      let score = overflow;
+      if (/ag-body-vertical-scroll-viewport/.test(className)) score += 100000;
+      if (/ag-body-viewport/.test(className)) score += 80000;
+      if (/ag-center-cols-viewport/.test(className)) score += 60000;
+      return score;
+    }
+    const candidates = [
+      ...document.querySelectorAll('.ag-body-vertical-scroll-viewport, .ag-body-viewport, .ag-center-cols-viewport'),
+      ...Array.from(document.querySelectorAll('*')).filter(el => {
+        const style = window.getComputedStyle(el);
+        return /(auto|scroll)/.test(style.overflowY || '') && el.scrollHeight > el.clientHeight + 80;
+      })
+    ];
+    const seen = new Set();
+    const scroller = candidates
+      .filter(el => {
+        if (!el || seen.has(el)) return false;
+        seen.add(el);
+        return scoreScroller(el) > 0;
+      })
+      .sort((a, b) => scoreScroller(b) - scoreScroller(a))[0] || null;
+    if (scroller) {
+      scroller.scrollTop = 0;
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+      scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: -900, bubbles: true, cancelable: true }));
+    }
+    window.scrollTo(0, 0);
+  });
+  await page.waitForTimeout(waitMs);
+}
+
 async function installAutoShiftDetailRuntime(page) {
   await page.evaluate(({ delayMs }) => {
     if (window.__adpAutoShiftDetailRuntimeInstalled) return;
@@ -1426,7 +1471,13 @@ async function installAutoShiftDetailRuntime(page) {
       const row = getRow(entity);
       const dayCell = getDayCell(entity);
       const name = compactText(row?.querySelector('[col-id="name"] .location-schedule-employee-cell__name')?.textContent || row?.querySelector('[col-id="name"]')?.textContent || '');
-      const primaryJob = compactText(row?.querySelector('[col-id="primaryJob"]')?.textContent || '');
+      const primaryJob = compactText(
+        row?.querySelector('[col-id="primaryJob"] primary-job-cell span')?.textContent
+        || row?.querySelector('[col-id="primaryJob"] .ag-cell-text > span')?.textContent
+        || row?.querySelector('[col-id="primaryJob"] .ag-cell-text')?.childNodes?.[0]?.textContent
+        || row?.querySelector('[col-id="primaryJob"]')?.textContent
+        || ''
+      );
       const shiftTitle = compactText(entity?.querySelector('.location-schedule-cell__title')?.textContent || entity?.textContent || '');
       const automationId = entity?.getAttribute('automation-id') || '';
       return {
@@ -1638,7 +1689,13 @@ async function scrollToBaselineEmployeeRow(page, baselineRow, options = {}) {
         return cleanText(el.querySelector('[col-id="name"] .location-schedule-employee-cell__name')?.textContent || el.querySelector('[col-id="name"]')?.textContent || '');
       }
       function rowPrimaryJob(el) {
-        return cleanText(el.querySelector('[col-id="primaryJob"]')?.textContent || '');
+        return cleanText(
+          el.querySelector('[col-id="primaryJob"] primary-job-cell span')?.textContent
+          || el.querySelector('[col-id="primaryJob"] .ag-cell-text > span')?.textContent
+          || el.querySelector('[col-id="primaryJob"] .ag-cell-text')?.childNodes?.[0]?.textContent
+          || el.querySelector('[col-id="primaryJob"]')?.textContent
+          || ''
+        );
       }
       function rowSortIndex(el) {
         const raw = el.getAttribute('row-index') || '';
@@ -1807,6 +1864,13 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
     const x = Math.max(1, Math.min(current.right - 2, current.left + Math.min(40, Math.max(8, current.width / 2))));
     const y = Math.max(1, Math.min(current.bottom - 2, current.top + Math.min(18, Math.max(8, current.height / 2))));
 
+    await page.evaluate(targetId => {
+      const entity = document.querySelector(`[data-adp-auto-shift-target="${CSS.escape(targetId)}"]`);
+      if (!entity) return;
+      window.__adpAutoLastClickedEntity = entity;
+      window.__adpAutoLastClickToken = (window.__adpAutoLastClickToken || 0) + 1;
+    }, target.targetId);
+
     await page.mouse.move(x, y);
     await page.waitForTimeout(40);
     await page.mouse.down();
@@ -1814,10 +1878,29 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
     await page.mouse.up();
     await page.waitForTimeout(90);
 
-    const record = await page.evaluate(async ({ targetId, delayMs }) => {
+    let record = await page.evaluate(async ({ targetId, delayMs }) => {
       if (!window.__adpAutoCaptureShiftDetailTarget) return { kind: 'shift-detail-miss', message: 'capture helper missing', targetId };
       return window.__adpAutoCaptureShiftDetailTarget(targetId, { delayMs });
     }, { targetId: target.targetId, delayMs });
+
+    if (record?.kind !== 'shift-detail-record') {
+      // fallback to the manual repo's in-page click path
+      // useful for the pinned current-user row when the outer mouse click focuses the grid but loses the transient popover
+      record = await page.evaluate(async ({ targetId, delayMs }) => {
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+        const entity = document.querySelector(`[data-adp-auto-shift-target="${CSS.escape(targetId)}"]`);
+        if (!entity || !window.__adpAutoCaptureShiftDetailTarget) {
+          return { kind: 'shift-detail-miss', message: 'fallback target/helper missing', targetId };
+        }
+        window.__adpAutoLastClickedEntity = entity;
+        window.__adpAutoLastClickToken = (window.__adpAutoLastClickToken || 0) + 1;
+        entity.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+        entity.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+        entity.click();
+        await sleep(60);
+        return window.__adpAutoCaptureShiftDetailTarget(targetId, { delayMs });
+      }, { targetId: target.targetId, delayMs });
+    }
 
     if (record?.kind === 'shift-detail-record') records.push(record);
     else misses.push(record || { kind: 'shift-detail-miss', ...target, message: 'no capture result returned', capturedAt: new Date().toISOString() });
@@ -1848,6 +1931,7 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
 
 async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
   await installAutoShiftDetailRuntime(page);
+  await resetScheduleGridToTop(page);
 
   const rows = (baselineCapture?.rows || []).slice().sort((a, b) => {
     if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
@@ -1865,6 +1949,12 @@ async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
   console.log(`Shift breakdown capture pass: ${rowsWithShifts.length} employee rows with shifts from the baseline capture.`);
 
   for (const row of rowsWithShifts) {
+    if (row.sortIndex === -1 || String(row.name || '').trim().toLowerCase() === 'my schedule') {
+      // the current-user row is pinned separately from the virtualized body
+      // reset to the top before clicking it to match the manual capture flow
+      await resetScheduleGridToTop(page);
+    }
+
     if (timeoutMs > 0 && Date.now() - started > timeoutMs) {
       throw new Error(`Shift breakdown capture timed out after ${timeoutMs}ms before completing ${row.name}. Processed ${processedRows}/${rowsWithShifts.length} rows.`);
     }
@@ -2094,6 +2184,7 @@ async function main() {
 
       if (shiftDetailEnabled()) {
         console.log('Starting second pass for shift breakdowns from the complete baseline employee list...');
+        await resetScheduleGridToTop(page);
         virtualGridCapture = await captureShiftBreakdownsFromBaseline(page, virtualGridCapture);
       }
 
