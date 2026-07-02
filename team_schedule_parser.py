@@ -40,6 +40,47 @@ SHIFT_RE = re.compile(
     re.IGNORECASE,
 )
 DAY_COL_RE = re.compile(r"^day-(\d)$")
+SEGMENT_RE = re.compile(
+    r"^\s*\d+\.\s*"
+    r"(?P<start>\d{1,2}:\d{2}\s*[AP]M)\s*-\s*"
+    r"(?P<end>\d{1,2}:\d{2}\s*[AP]M)"
+    r"(?:\s*\[(?P<hours>\d+(?:\.\d+)?)\])?"
+    r"(?:\s+(?P<kind>[A-Za-z ]+))?\s*$",
+    re.IGNORECASE,
+)
+
+SHIFT_TITLE_LIBRARY = (
+    "Apparel",
+    "Arc'teryx",
+    "Bikes",
+    "Camp",
+    "Cash",
+    "Changeroom",
+    "Climb",
+    "Cycling Accessories",
+    "Footwear",
+    "Greeter",
+    "Lunch Cover",
+    "MSD",
+    "Packs",
+    "Retail Floor",
+    "Retail Frontline",
+    "Retail VM",
+    "Snowsports",
+    "Tents",
+    "VSPRO",
+    "Watersports",
+    "Break",
+)
+
+GENERIC_SHIFT_TITLES = {"Retail Floor", "Retail Frontline"}
+
+
+def title_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii").lower())
+
+
+SHIFT_TITLE_BY_KEY = {title_key(title): title for title in SHIFT_TITLE_LIBRARY}
 
 
 @dataclass(frozen=True)
@@ -58,6 +99,9 @@ class ShiftRecord:
     end_datetime: str
     hours: float | None
     raw_shift_text: str
+    shift_title: str
+    shift_departments: str
+    shift_segments: str
     shift_detail: str
     shift_id: str
     is_transfer: bool
@@ -75,6 +119,99 @@ def clean_multiline_text(value: str | None) -> str:
     text = str(value).replace("\r\n", "\n").replace("\r", "\n")
     lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
     lines = [line for line in lines if line]
+    return "\n".join(lines)
+
+
+def match_shift_title(value: str | None) -> str:
+    text = clean_text(value)
+    if not text:
+        return ""
+    direct = SHIFT_TITLE_BY_KEY.get(title_key(text))
+    if direct:
+        return direct
+    if "/" in text:
+        tail = clean_text(text.split("/")[-1])
+        direct = SHIFT_TITLE_BY_KEY.get(title_key(tail))
+        if direct:
+            return direct
+        return tail
+    return ""
+
+
+def format_hours(value: float | None) -> str:
+    if value is None:
+        return ""
+    return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def parse_shift_detail_segments(shift_detail: str) -> list[dict]:
+    lines = clean_multiline_text(shift_detail).splitlines()
+    segments: list[dict] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = SEGMENT_RE.match(line)
+        if not match:
+            index += 1
+            continue
+
+        kind = clean_text(match.group("kind") or "")
+        hours_text = match.group("hours")
+        title = "Break" if kind.lower() == "break" else ""
+        next_index = index + 1
+        if next_index < len(lines) and not SEGMENT_RE.match(lines[next_index]):
+            next_title = match_shift_title(lines[next_index])
+            if next_title:
+                title = next_title
+                next_index += 1
+
+        segments.append(
+            {
+                "start": clean_text(match.group("start")).upper(),
+                "end": clean_text(match.group("end")).upper(),
+                "hours": float(hours_text) if hours_text is not None else None,
+                "kind": kind,
+                "title": title or clean_text(kind),
+            }
+        )
+        index = next_index
+    return segments
+
+
+def ordered_unique(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for value in values:
+        text = clean_text(value)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        output.append(text)
+    return output
+
+
+def summarize_shift_titles(titles: Iterable[str], fallback: str = "") -> str:
+    useful_titles = [title for title in ordered_unique(titles) if title not in GENERIC_SHIFT_TITLES and title.lower() != "break"]
+    if not useful_titles:
+        fallback_title = match_shift_title(fallback) or clean_text(fallback)
+        return fallback_title or "Work Shift"
+    if len(useful_titles) <= 3:
+        return " / ".join(useful_titles)
+    return " / ".join(useful_titles[:2]) + f" / +{len(useful_titles) - 2} more"
+
+
+def build_segments_text(segments: list[dict]) -> str:
+    lines: list[str] = []
+    for segment in segments:
+        title = clean_text(segment.get("title") or segment.get("kind") or "")
+        if not title:
+            continue
+        hours = format_hours(segment.get("hours"))
+        suffix = f" ({hours}h)" if hours else ""
+        lines.append(f"{segment['start']} - {segment['end']} — {title}{suffix}")
     return "\n".join(lines)
 
 
@@ -182,6 +319,11 @@ def parse_shift_entities(
             or entity.get("data-adp-manual-shift-detail")
             or ""
         )
+        segments = parse_shift_detail_segments(shift_detail)
+        segment_titles = [segment.get("title", "") for segment in segments]
+        shift_title = summarize_shift_titles(segment_titles, fallback=primary_job)
+        shift_departments = "; ".join(title for title in ordered_unique(segment_titles) if title and title.lower() != "break")
+        shift_segments = build_segments_text(segments)
         shift_box = entity.select_one(".location-schedule-cell__shift")
         shift_classes = shift_box.get("class", []) if shift_box else []
         is_transfer = "location-schedule-cell__transfer-bar" in shift_classes or entity.select_one(".icon-k-transfer") is not None
@@ -202,6 +344,9 @@ def parse_shift_entities(
                 end_datetime=end_dt.isoformat(timespec="minutes"),
                 hours=hours,
                 raw_shift_text=raw,
+                shift_title=shift_title,
+                shift_departments=shift_departments,
+                shift_segments=shift_segments,
                 shift_detail=shift_detail,
                 shift_id=shift_id,
                 is_transfer=is_transfer,
@@ -428,17 +573,17 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
 
     for shift in employee['shifts']:
         uid_key = f"{shift.get('employee_slug')}:{shift.get('date')}:{shift.get('start_time')}:{shift.get('end_time')}:{shift.get('shift_id')}"
-        summary = 'Work Shift'
-        description_parts = [
-            f"Employee: {shift.get('employee_name', '')}",
-            f"Job: {shift.get('primary_job', '')}",
-            f"Source: {shift.get('source_file', '')}",
-            f"Raw: {shift.get('raw_shift_text', '')}",
-        ]
-        if shift.get('shift_detail'):
-            description_parts.append(f"Shift breakdown:\n{shift.get('shift_detail', '')}")
-        if shift.get('is_transfer'):
-            description_parts.append('Transfer: yes')
+        summary = clean_text(shift.get('shift_title')) or 'Work Shift'
+        description_parts = []
+        if shift.get('shift_segments'):
+            description_parts.extend([
+                'Schedule:',
+                shift.get('shift_segments', ''),
+            ])
+        else:
+            description_parts.append(f"Time: {shift.get('start_time', '')} - {shift.get('end_time', '')}")
+        if shift.get('hours') is not None:
+            description_parts.append(f"Total: {format_hours(shift.get('hours'))} hours")
 
         lines.extend([
             'BEGIN:VEVENT',
@@ -523,6 +668,7 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
         "calendar_refresh_minutes": refresh_minutes,
         "shifts_with_detail_count": sum(1 for rec in records if rec.shift_detail),
         "shifts_missing_detail_count": sum(1 for rec in records if not rec.shift_detail),
+        "shifts_with_clean_segments_count": sum(1 for rec in records if rec.shift_segments),
         "output_files": ["shifts.csv", "shifts.json", "employees.json", "calendar_index.json", "calendars/*.ics", "parse_summary.json"],
     }
     (out_dir / "parse_summary.json").write_text(
