@@ -200,6 +200,11 @@ function numberEnv(name, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function nonNegativeNumberEnv(name, fallback) {
+  const parsed = Number.parseInt(env(name, String(fallback)), 10);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
 function timestamp() {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
@@ -2234,8 +2239,17 @@ async function main() {
 
     const weeksToCaptureRaw = Number.parseInt(env('ADP_WEEKS_TO_CAPTURE', '4'), 10);
     const weeksToCapture = Number.isFinite(weeksToCaptureRaw) && weeksToCaptureRaw > 0 ? weeksToCaptureRaw : 4;
+    const startWeekOffset = nonNegativeNumberEnv('ADP_START_WEEK_OFFSET', 0);
     const savedHtmlPaths = [];
     let latestSaved = null;
+
+    if (startWeekOffset > 0) {
+      console.log(`Advancing ${startWeekOffset} week(s) before starting capture.`);
+      for (let offset = 0; offset < startWeekOffset; offset += 1) {
+        await waitForScheduleGridReady(page);
+        await clickNextScheduleWeek(page);
+      }
+    }
 
     for (let weekIndex = 0; weekIndex < weeksToCapture; weekIndex += 1) {
       await waitForScheduleGridReady(page);
@@ -2264,7 +2278,11 @@ async function main() {
       }
     }
 
-    await runParser(savedHtmlPaths, parsedOutDir);
+    if (boolEnv('ADP_SKIP_PARSE', false)) {
+      console.log('Skipping parser because ADP_SKIP_PARSE=true. Captured HTML files are ready for a later merge parse step.');
+    } else {
+      await runParser(savedHtmlPaths, parsedOutDir);
+    }
 
     if (traceActive) {
       await stopTraceIfActive(context, outputDir, 'success');

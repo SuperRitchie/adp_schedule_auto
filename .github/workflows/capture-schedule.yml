@@ -107,7 +107,7 @@ jobs:
           print('ADP_PASSWORD sha256 prefix:', hashlib.sha256(password.encode('utf-8')).hexdigest()[:16] if password else '')
           PY
 
-      - name: Capture and parse schedules
+      - name: Capture schedule weeks
         env:
           # Prefer the *_B64 secrets when present. The JS script decodes them
           # directly from process.env, so special characters never pass through
@@ -130,7 +130,8 @@ jobs:
           ADP_WINDOW_HEIGHT: "1000"
           ADP_SELECT_ALL_JOBS: "true"
           ADP_FILTER_DELAY_MS: "700"
-          ADP_WEEKS_TO_CAPTURE: "4"
+          ADP_WEEKS_TO_CAPTURE: "1"
+          ADP_SKIP_PARSE: "true"
           # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
           ADP_CAPTURE_SHIFT_DETAILS: "true"
           ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
@@ -139,13 +140,13 @@ jobs:
           ADP_SHIFT_DETAIL_DELAY_MS: "900"
           ADP_SHIFT_DETAIL_CLICK_DELAY_MS: "150"
           ADP_SHIFT_DETAIL_CAPTURE_TIMEOUT_MS: "3600000"
-          ADP_SHIFT_DETAIL_ROW_RETRIES: "2"
+          ADP_SHIFT_DETAIL_ROW_RETRIES: "5"
           ADP_SHIFT_DETAIL_FIND_ROW_MAX_PASSES: "240"
           ADP_NEXT_WEEK_DELAY_MS: "1500"
           ADP_NEXT_WEEK_TIMEOUT_MS: "45000"
           ADP_POST_LOGIN_TIMEOUT_MS: "120000"
           ADP_DEBUG: "true"
-          ADP_TRACE: "true"
+          ADP_TRACE: "false"
           GOOGLE_CREDENTIALS_JSON_B64: ${{ secrets.GOOGLE_CREDENTIALS_JSON_B64 }}
           GOOGLE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_TOKEN_JSON_B64 }}
           GOOGLE_CREDENTIALS_PATH: .secrets/gmail_credentials.json
@@ -155,19 +156,51 @@ jobs:
           CALENDAR_ALARMS: 1440,180,60
           CALENDAR_REFRESH_MINUTES: "60"
         run: |
-          if [ "${ADP_HEADLESS}" = "false" ]; then
-            echo "Running headed Chromium under xvfb-run to match local headed/incognito conditions."
-            xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
-          else
-            echo "Running headless Chromium."
-            node adp_schedule_auto.js
+          set -euo pipefail
+
+          for ADP_START_WEEK_OFFSET in 0 1 2 3; do
+            echo "::group::Capture ADP week offset ${ADP_START_WEEK_OFFSET}"
+            export ADP_START_WEEK_OFFSET
+            export OUTPUT_DIR="captures/week_${ADP_START_WEEK_OFFSET}"
+            export PARSED_OUT_DIR="parsed_schedule_week_${ADP_START_WEEK_OFFSET}"
+            rm -rf "$OUTPUT_DIR" "$PARSED_OUT_DIR"
+
+            if [ "${ADP_HEADLESS}" = "false" ]; then
+              echo "Running headed Chromium under xvfb-run for week offset ${ADP_START_WEEK_OFFSET}."
+              xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
+            else
+              echo "Running headless Chromium for week offset ${ADP_START_WEEK_OFFSET}."
+              node adp_schedule_auto.js
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Parse merged schedule outputs
+        env:
+          CALENDAR_TIMEZONE: America/Vancouver
+          CALENDAR_ALARMS: 1440,180,60
+          CALENDAR_REFRESH_MINUTES: "60"
+        run: |
+          set -euo pipefail
+          mapfile -t html_files < <(find captures -path "*/schedule_*.html" -type f | sort)
+          printf 'Captured HTML files for final parse:\n'
+          printf '  %s\n' "${html_files[@]}"
+          if [ "${#html_files[@]}" -ne 4 ]; then
+            echo "Expected exactly 4 captured week HTML files, got ${#html_files[@]}" >&2
+            exit 1
           fi
+          python3 team_schedule_parser.py "${html_files[@]}" \
+            --out-dir parsed_schedule \
+            --timezone "$CALENDAR_TIMEZONE" \
+            --calendar-location "" \
+            --alarms "$CALENDAR_ALARMS" \
+            --refresh-minutes "$CALENDAR_REFRESH_MINUTES"
 
       - name: Check full shift breakdown coverage
         run: |
           set -euo pipefail
-          grep -n "captured_shift_detail_count" captures/*.metadata.json
-          grep -n "shift_detail_miss_count" captures/*.metadata.json
+          find captures -name "*.metadata.json" -print -exec grep -n "captured_shift_detail_count" {} \;
+          find captures -name "*.metadata.json" -print -exec grep -n "shift_detail_miss_count" {} \;
           python3 - <<'PY'
           from pathlib import Path
 
@@ -241,13 +274,13 @@ jobs:
         with:
           name: adp-debug-artifacts
           path: |
-            captures/*.debug.json
-            captures/*.metadata.json
-            captures/*.png
-            captures/*.html
-            captures/*.visible_text.txt
-            captures/latest_visible_text.txt
-            captures/trace_*.zip
+            captures/**/*.debug.json
+            captures/**/*.metadata.json
+            captures/**/*.png
+            captures/**/*.html
+            captures/**/*.visible_text.txt
+            captures/**/latest_visible_text.txt
+            captures/**/trace_*.zip
             parsed_schedule/parse_summary.json
           if-no-files-found: ignore
           retention-days: 3
