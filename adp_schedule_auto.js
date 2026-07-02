@@ -1937,7 +1937,17 @@ async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
     if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
-  const rowsWithShifts = rows.filter(row => Number(row.shiftCount || 0) > 0);
+  const allRowsWithShifts = rows.filter(row => Number(row.shiftCount || 0) > 0);
+  const skippedRows = [];
+  const rowsWithShifts = allRowsWithShifts.filter(row => {
+    const name = String(row.name || '').trim();
+    const isPinnedMySchedule = name === 'My Schedule' || Number(row.sortIndex) < 0;
+    if (isPinnedMySchedule) {
+      skippedRows.push({ name: row.name, primaryJob: row.primaryJob, shiftCount: row.shiftCount, reason: 'pinned My Schedule row' });
+      return false;
+    }
+    return true;
+  });
   const rowRetries = Number(env('ADP_SHIFT_DETAIL_ROW_RETRIES', '2'));
   const timeoutMs = Number(env('ADP_SHIFT_DETAIL_CAPTURE_TIMEOUT_MS', '3600000'));
   const started = Date.now();
@@ -1946,6 +1956,9 @@ async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
   const misses = [];
   let processedRows = 0;
 
+  if (skippedRows.length) {
+    console.log(`Skipping ${skippedRows.length} pinned non-employee row(s) during strict shift-detail pass: ${skippedRows.map(row => row.name).join(', ')}`);
+  }
   console.log(`Shift breakdown capture pass: ${rowsWithShifts.length} employee rows with shifts from the baseline capture.`);
 
   for (const row of rowsWithShifts) {
@@ -1994,6 +2007,7 @@ async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
       captured_shift_detail_count: records.length,
       shift_detail_miss_count: misses.length,
       complete: processedRows === rowsWithShifts.length && misses.length === 0,
+      skipped_non_employee_rows: skippedRows,
       records_preview: records.slice(0, 12).map(record => ({ employeeName: record.employeeName, shiftTitle: record.shiftTitle })),
       misses_preview: misses.slice(0, 12).map(miss => ({ employeeName: miss.employeeName, shiftTitle: miss.shiftTitle, message: miss.message })),
     }
