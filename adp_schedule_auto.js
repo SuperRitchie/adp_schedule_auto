@@ -1131,7 +1131,7 @@ async function collectVirtualGridRows(page) {
     const rows = new Map();
 
     function cleanText(value) {
-      return String(value || '').replace(/\s+/g, ' ').trim();
+      return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
     }
 
     function getExpectedEmployeeCount() {
@@ -1152,6 +1152,10 @@ async function collectVirtualGridRows(page) {
       );
     }
 
+    function rowPrimaryJob(row) {
+      return cleanText(row.querySelector('[col-id="primaryJob"]')?.textContent || '');
+    }
+
     function rowSortIndex(row) {
       const raw = row.getAttribute('row-index') || '';
       if (raw === 't-0') return -1;
@@ -1159,125 +1163,751 @@ async function collectVirtualGridRows(page) {
       return Number.isFinite(parsed) ? parsed : 999999;
     }
 
-    function collectVisibleRows(reason) {
-      const selector = [
-        '.ag-floating-top-container > div[role="row"]',
-        '.ag-center-cols-container > div[role="row"]'
-      ].join(', ');
+    function getDayCell(entity) {
+      return entity?.closest?.('[col-id^="day-"]') || null;
+    }
 
+    function shiftTitle(entity) {
+      return cleanText(entity?.querySelector('.location-schedule-cell__title')?.textContent || entity?.textContent || '');
+    }
+
+    function rowShiftTargets(row) {
+      return Array.from(row.querySelectorAll('.location-schedule-cell__entity, [automation-id^="location_schedule_cell_shift_"]'))
+        .map((entity, index) => {
+          const title = shiftTitle(entity);
+          const dayCol = getDayCell(entity)?.getAttribute('col-id') || '';
+          const automationId = entity.getAttribute('automation-id') || '';
+          const shiftId = automationId.replace('location_schedule_cell_shift_', '') || `${dayCol}-${index}`;
+          return { index, title, dayCol, automationId, shiftId };
+        })
+        .filter(item => item.title);
+    }
+
+    function rowKey(row) {
+      const name = rowName(row);
+      const primaryJob = rowPrimaryJob(row);
+      const employeeId = row.querySelector('[automation-id^="location_schedule_employee_cell_"]')?.getAttribute('automation-id') || '';
+      return [name.toLowerCase(), primaryJob.toLowerCase(), employeeId].join('|');
+    }
+
+    function collectVisibleRows(reason) {
+      const selector = '.ag-floating-top-container > div[role="row"], .ag-center-cols-container > div[role="row"]';
       for (const row of document.querySelectorAll(selector)) {
         const name = rowName(row);
         if (!name) continue;
 
-        const rowId = row.getAttribute('row-id') || '';
-        const rowIndex = row.getAttribute('row-index') || '';
-        const primaryJob = cleanText(row.querySelector('[col-id="primaryJob"]')?.textContent || '');
-
-        const key = rowId ? `id:${rowId}` : `pinned:${name}:${primaryJob}`;
-        rows.set(key, {
+        const primaryJob = rowPrimaryJob(row);
+        const key = rowKey(row);
+        const shifts = rowShiftTargets(row);
+        const existing = rows.get(key);
+        const candidate = {
           key,
           name,
-          rowId,
-          rowIndex,
+          primaryJob,
+          rowId: row.getAttribute('row-id') || '',
+          rowIndex: row.getAttribute('row-index') || '',
           sortIndex: rowSortIndex(row),
+          shiftCount: shifts.length,
+          shifts,
           reason,
           html: row.outerHTML,
-        });
+        };
+
+        if (!existing || candidate.shiftCount > existing.shiftCount || candidate.html.length > existing.html.length) {
+          rows.set(key, candidate);
+        }
       }
     }
 
-    function scrollableElements() {
-      const preferredSelectors = [
-        '.ag-body-viewport',
-        '.ag-center-cols-viewport',
-        '.ag-body-vertical-scroll-viewport'
-      ];
-
-      const preferred = preferredSelectors
-        .flatMap(selector => Array.from(document.querySelectorAll(selector)))
-        .filter(Boolean);
-
-      const fallback = Array.from(document.querySelectorAll('*'))
-        .filter(el => {
-          const style = window.getComputedStyle(el);
-          const canScrollY = /(auto|scroll)/.test(style.overflowY || '');
-          return canScrollY && el.scrollHeight > el.clientHeight + 80;
-        })
-        .sort((a, b) => (b.scrollHeight - b.clientHeight) - (a.scrollHeight - a.clientHeight));
-
-      const seen = new Set();
-      return [...preferred, ...fallback].filter(el => {
-        if (!el || seen.has(el)) return false;
-        seen.add(el);
-        return el.scrollHeight > el.clientHeight + 20;
-      });
-    }
-
-    const expectedEmployeeCount = getExpectedEmployeeCount();
-    window.scrollTo(0, 0);
-    await sleep(delayMs);
-    collectVisibleRows('initial');
-
-    const scrollers = scrollableElements();
-    const scroller = scrollers[0];
-
-    if (!scroller) {
+    function visibleRowStats() {
+      const visibleRows = Array.from(document.querySelectorAll('.ag-floating-top-container > div[role="row"], .ag-center-cols-container > div[role="row"]'))
+        .map(row => ({ name: rowName(row), primaryJob: rowPrimaryJob(row), sortIndex: rowSortIndex(row) }))
+        .filter(row => row.name);
+      const indexes = visibleRows.map(row => row.sortIndex).filter(index => Number.isFinite(index) && index >= 0 && index < 999999);
       return {
-        expectedEmployeeCount,
-        rowCount: rows.size,
-        rows: Array.from(rows.values()),
-        usedScroller: null,
+        firstVisibleName: visibleRows[0]?.name || '',
+        lastVisibleName: visibleRows[visibleRows.length - 1]?.name || '',
+        minVisibleIndex: indexes.length ? Math.min(...indexes) : null,
+        maxVisibleIndex: indexes.length ? Math.max(...indexes) : null,
       };
     }
 
-    const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-    const step = Math.max(120, Math.floor(scroller.clientHeight * 0.45));
+    function scoreScroller(el) {
+      if (!el) return -1;
+      const rect = el.getBoundingClientRect();
+      const overflow = Math.max(0, el.scrollHeight - el.clientHeight);
+      if (overflow < 20 || rect.width < 300 || rect.height < 150) return -1;
+      const className = String(el.className || '');
+      let score = overflow;
+      if (/ag-body-vertical-scroll-viewport/.test(className)) score += 100000;
+      if (/ag-body-viewport/.test(className)) score += 80000;
+      if (/ag-center-cols-viewport/.test(className)) score += 60000;
+      if (el.querySelector?.('.ag-center-cols-container, div[role="row"]')) score += 20000;
+      return score;
+    }
+
+    function gridScroller() {
+      const candidates = [
+        ...document.querySelectorAll('.ag-body-vertical-scroll-viewport, .ag-body-viewport, .ag-center-cols-viewport'),
+        ...Array.from(document.querySelectorAll('*')).filter(el => {
+          const style = window.getComputedStyle(el);
+          return /(auto|scroll)/.test(style.overflowY || '') && el.scrollHeight > el.clientHeight + 80;
+        })
+      ];
+      const seen = new Set();
+      return candidates
+        .filter(el => {
+          if (!el || seen.has(el)) return false;
+          seen.add(el);
+          return scoreScroller(el) > 0;
+        })
+        .sort((a, b) => scoreScroller(b) - scoreScroller(a))[0] || null;
+    }
+
+    function isComplete(expectedEmployeeCount) {
+      const sorted = Array.from(rows.values());
+      const realIndexes = sorted.map(row => row.sortIndex).filter(index => index >= 0 && index < 999999);
+      const maxSortIndex = realIndexes.length ? Math.max(...realIndexes) : null;
+      const uniqueCount = sorted.length;
+      if (!expectedEmployeeCount) return false;
+      // my schedule is usually pinned at row-index t-0 and still counted in the header
+      const targetLastIndex = Math.max(0, expectedEmployeeCount - 2);
+      return uniqueCount >= expectedEmployeeCount && maxSortIndex !== null && maxSortIndex >= targetLastIndex;
+    }
+
+    const expectedEmployeeCount = getExpectedEmployeeCount();
+    const scroller = gridScroller();
+    window.scrollTo(0, 0);
+    await sleep(delayMs);
+
+    if (!scroller) {
+      collectVisibleRows('no-scroller');
+      const rowsOut = Array.from(rows.values()).sort((a, b) => a.sortIndex - b.sortIndex || a.name.localeCompare(b.name));
+      return {
+        expectedEmployeeCount,
+        rowCount: rowsOut.length,
+        rows: rowsOut,
+        complete: !expectedEmployeeCount || rowsOut.length >= expectedEmployeeCount,
+        usedScroller: null,
+        scrollStats: visibleRowStats(),
+      };
+    }
 
     scroller.scrollTop = 0;
     scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
     await sleep(delayMs * 2);
     collectVisibleRows('top');
 
-    for (let y = 0; y <= max + step; y += step) {
-      scroller.scrollTop = Math.min(y, max);
+    let previousKey = '';
+    let stablePasses = 0;
+    let pass = 0;
+    const maxPasses = 260;
+    const step = Math.max(80, Math.floor(scroller.clientHeight * 0.35));
+
+    while (pass < maxPasses) {
+      pass += 1;
+      const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const current = Math.max(0, scroller.scrollTop || 0);
+      const next = Math.min(max, current + step);
+      if (next <= current && current < max) {
+        scroller.scrollTop = Math.min(max, current + 80);
+      } else {
+        scroller.scrollTop = next;
+      }
       scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
       await sleep(delayMs);
-      collectVisibleRows(`scroll:${Math.min(y, max)}`);
+      collectVisibleRows(`scroll-pass:${pass}:${Math.round(scroller.scrollTop)}`);
 
-      if (expectedEmployeeCount && rows.size >= expectedEmployeeCount + 1) break;
+      const stats = visibleRowStats();
+      const rowsOut = Array.from(rows.values());
+      const realIndexes = rowsOut.map(row => row.sortIndex).filter(index => index >= 0 && index < 999999);
+      const maxSortIndex = realIndexes.length ? Math.max(...realIndexes) : null;
+      const stateKey = [rowsOut.length, maxSortIndex, Math.round(scroller.scrollTop), Math.round(max), stats.lastVisibleName].join('|');
+      if (stateKey === previousKey) stablePasses += 1;
+      else stablePasses = 0;
+      previousKey = stateKey;
+
+      const atBottom = Math.abs(max - scroller.scrollTop) < 3;
+      if (isComplete(expectedEmployeeCount) && atBottom && stablePasses >= 2) break;
+
+      if (atBottom && stablePasses >= 6) {
+        // wheel nudges help ag grid render the final virtual rows even when scrolltop is already maxed
+        window.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true, cancelable: true }));
+        scroller.dispatchEvent(new WheelEvent('wheel', { deltaY: 900, bubbles: true, cancelable: true }));
+        await sleep(delayMs);
+        collectVisibleRows(`bottom-nudge:${pass}`);
+        if (isComplete(expectedEmployeeCount)) break;
+      }
     }
 
-    scroller.scrollTop = max;
+    scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
     scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await sleep(delayMs);
+    await sleep(delayMs * 2);
     collectVisibleRows('bottom');
 
     const sortedRows = Array.from(rows.values()).sort((a, b) => {
       if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
-      return a.name.localeCompare(b.name);
+      return a.name.localeCompare(b.name) || a.primaryJob.localeCompare(b.primaryJob);
     });
+    const realIndexes = sortedRows.map(row => row.sortIndex).filter(index => index >= 0 && index < 999999);
+    const maxSortIndex = realIndexes.length ? Math.max(...realIndexes) : null;
 
     return {
       expectedEmployeeCount,
       rowCount: sortedRows.length,
       rows: sortedRows,
+      complete: !expectedEmployeeCount || (sortedRows.length >= expectedEmployeeCount && maxSortIndex !== null && maxSortIndex >= Math.max(0, expectedEmployeeCount - 2)),
+      maxSortIndex,
       usedScroller: {
         className: scroller.className || '',
         scrollHeight: scroller.scrollHeight,
         clientHeight: scroller.clientHeight,
-        maxScrollTop: max,
+        maxScrollTop: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
         step,
       },
+      scrollStats: visibleRowStats(),
     };
-  }, { delayMs: Number(env('ADP_SCROLL_DELAY_MS', '250')) });
+  }, { delayMs: Number(env('ADP_SCROLL_DELAY_MS', '500')) });
 
-  console.log(`Collected ${result.rowCount} rendered schedule rows${result.expectedEmployeeCount ? `; header expects ${result.expectedEmployeeCount}` : ''}.`);
-  if (result.expectedEmployeeCount && result.rowCount < result.expectedEmployeeCount) {
-    console.warn(`WARNING: collected ${result.rowCount} rows, but the header expects ${result.expectedEmployeeCount}. Try increasing ADP_SCROLL_DELAY_MS.`);
+  console.log(`Collected ${result.rowCount} rendered schedule rows${result.expectedEmployeeCount ? `; header expects ${result.expectedEmployeeCount}` : ''}${result.maxSortIndex !== undefined && result.maxSortIndex !== null ? `; max row-index ${result.maxSortIndex}` : ''}${result.scrollStats?.lastVisibleName ? `; last visible ${result.scrollStats.lastVisibleName}` : ''}.`);
+  if (result.expectedEmployeeCount && !result.complete) {
+    console.warn(`WARNING: collected ${result.rowCount} rows, but the header expects ${result.expectedEmployeeCount}. Last visible row was ${result.scrollStats?.lastVisibleName || 'unknown'}. Try increasing ADP_SCROLL_DELAY_MS.`);
   }
 
   await page.waitForTimeout(1000);
   return result;
+}
+
+function shiftDetailEnabled() {
+  return boolEnv('ADP_CAPTURE_SHIFT_DETAILS', false);
+}
+
+async function installAutoShiftDetailRuntime(page) {
+  await page.evaluate(({ delayMs }) => {
+    if (window.__adpAutoShiftDetailRuntimeInstalled) return;
+    window.__adpAutoShiftDetailRuntimeInstalled = true;
+    window.__adpAutoDetailDelayMs = delayMs;
+    window.__adpAutoOverlaySnapshots = [];
+    window.__adpAutoLastClickedEntity = null;
+    window.__adpAutoLastClickToken = 0;
+
+    const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    function cleanText(value) {
+      return String(value || '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/\n[ \t]+/g, '\n')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
+    }
+
+    function compactText(value) {
+      return cleanText(value).replace(/\s+/g, ' ').trim();
+    }
+
+    function isVisible(el) {
+      if (!el || !(el instanceof Element)) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+
+    function getRow(entity) {
+      return entity?.closest?.('div[role="row"]') || null;
+    }
+
+    function getDayCell(entity) {
+      return entity?.closest?.('[col-id^="day-"]') || null;
+    }
+
+    function baseMeta(entity) {
+      const row = getRow(entity);
+      const dayCell = getDayCell(entity);
+      const name = compactText(row?.querySelector('[col-id="name"] .location-schedule-employee-cell__name')?.textContent || row?.querySelector('[col-id="name"]')?.textContent || '');
+      const primaryJob = compactText(row?.querySelector('[col-id="primaryJob"]')?.textContent || '');
+      const shiftTitle = compactText(entity?.querySelector('.location-schedule-cell__title')?.textContent || entity?.textContent || '');
+      const automationId = entity?.getAttribute('automation-id') || '';
+      return {
+        employeeName: name,
+        primaryJob,
+        rowId: row?.getAttribute('row-id') || '',
+        rowIndex: row?.getAttribute('row-index') || '',
+        dayCol: dayCell?.getAttribute('col-id') || '',
+        shiftTitle,
+        shiftId: automationId.replace('location_schedule_cell_shift_', '') || automationId,
+      };
+    }
+
+    function textTimeCount(text) {
+      const matches = compactText(text).match(/\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M/gi);
+      return matches ? matches.length : 0;
+    }
+
+    function rejectElement(el) {
+      if (!el || !(el instanceof Element)) return true;
+      const tag = el.tagName.toLowerCase();
+      if (['html', 'body', 'script', 'style', 'link', 'meta', 'svg', 'path'].includes(tag)) return true;
+      if (el.closest('nav, header, .navbar-nav, .navmenu, .actionBar, .toolbar-dropdown, .checkboxLayer, isteven-multi-select')) return true;
+      const cls = String(el.className || '');
+      const overlayClass = /(popover|tooltip|overlay|modal|dialog|flyout|floating|schedule).*?(detail|tooltip|popover|popup)|cdk-overlay|ngb-popover|uib-popover|ukg-popover/i.test(cls);
+      const badGridClass = /\bag-(center|body|row|cell|viewport|pinned|root|header|layout|virtual|floating|full-width)\b/.test(cls);
+      if (badGridClass && !overlayClass) return true;
+      if (el.matches('[role="row"], [role="grid"], [role="gridcell"], .ag-row, .ag-cell, .ag-center-cols-container, .ag-body-viewport, .ag-root, .ag-root-wrapper')) return true;
+      if (el.querySelectorAll('.location-schedule-cell__entity, [automation-id^="location_schedule_cell_shift_"]').length > 2 && !overlayClass) return true;
+      return false;
+    }
+
+    function candidateElements(reason) {
+      const candidates = [];
+      for (const el of document.querySelectorAll('*')) {
+        if (!isVisible(el) || rejectElement(el)) continue;
+        const text = cleanText(el.innerText || el.textContent || '');
+        const compact = compactText(text);
+        if (compact.length < 20 || compact.length > 2600) continue;
+        if (!/\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M/i.test(compact)) continue;
+        const rect = el.getBoundingClientRect();
+        candidates.push({
+          reason,
+          tag: el.tagName.toLowerCase(),
+          className: String(el.className || ''),
+          text,
+          compact,
+          html: el.outerHTML,
+          rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+          timeCount: textTimeCount(compact),
+        });
+      }
+      return candidates;
+    }
+
+    function scoreCandidate(item, meta) {
+      let score = 0;
+      const text = item.compact || compactText(item.text || '');
+      if (meta.employeeName && text.includes(meta.employeeName)) score += 60;
+      const shiftTime = String(meta.shiftTitle || '').match(/\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M/i)?.[0] || '';
+      if (shiftTime && text.includes(shiftTime)) score += 80;
+      if (/\b\d+\.\s*\d{1,2}:\d{2}\s*[AP]M/i.test(text)) score += 80;
+      if (/\b(Transfer|Break|Meal|MEC\/English|Retail Floor|Cash|Frontline|Inventory|Cycling|Watersports|Climb)\b/i.test(text)) score += 55;
+      if (item.timeCount >= 2) score += 30;
+      if (/popover|tooltip|overlay|dialog|floating/i.test(item.className || '')) score += 30;
+      if (text.length > 120) score += 20;
+      if (text.length > 2200) score -= 60;
+      return score;
+    }
+
+    function recordOverlaySnapshot(reason) {
+      const meta = window.__adpAutoLastClickedEntity ? baseMeta(window.__adpAutoLastClickedEntity) : {};
+      const token = window.__adpAutoLastClickToken || 0;
+      const snapshots = candidateElements(reason).map(item => ({
+        ...item,
+        token,
+        score: scoreCandidate(item, meta),
+        capturedAt: new Date().toISOString(),
+      }));
+      window.__adpAutoOverlaySnapshots.push(...snapshots);
+      if (window.__adpAutoOverlaySnapshots.length > 120) {
+        window.__adpAutoOverlaySnapshots.splice(0, window.__adpAutoOverlaySnapshots.length - 120);
+      }
+      return snapshots;
+    }
+
+    let snapshotQueued = false;
+    function queueOverlaySnapshot(reason) {
+      if (snapshotQueued) return;
+      snapshotQueued = true;
+      requestAnimationFrame(() => {
+        snapshotQueued = false;
+        recordOverlaySnapshot(reason);
+      });
+    }
+
+    const observer = new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'childList' && mutation.addedNodes.length) {
+          queueOverlaySnapshot('mutation');
+          return;
+        }
+        if (mutation.type === 'attributes' && mutation.target instanceof Element) {
+          queueOverlaySnapshot('attribute');
+          return;
+        }
+      }
+    });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'style', 'aria-hidden', 'hidden'],
+    });
+
+    function bestDetailCandidate(entity, token) {
+      const meta = baseMeta(entity);
+      const entityText = compactText(entity?.textContent || '');
+      const liveCandidates = candidateElements('live')
+        .filter(item => item.compact !== entityText)
+        .map(item => ({ ...item, score: scoreCandidate(item, meta), source: 'live' }));
+      const snapshotCandidates = (window.__adpAutoOverlaySnapshots || [])
+        .filter(item => !token || !item.token || item.token === token)
+        .map(item => ({ ...item, score: scoreCandidate(item, meta), source: 'snapshot' }));
+      const candidates = [...liveCandidates, ...snapshotCandidates]
+        .filter(item => item.score >= 90)
+        .sort((a, b) => b.score - a.score || b.compact.length - a.compact.length);
+      return candidates[0] || null;
+    }
+
+    function attachDetail(entity, detailText) {
+      if (!entity || !detailText) return '';
+      entity.setAttribute('data-adp-shift-detail', detailText);
+      entity.setAttribute('data-adp-auto-shift-detail', detailText);
+      const row = getRow(entity);
+      return row ? row.outerHTML : '';
+    }
+
+    async function captureEntity(entity, kind, options = {}) {
+      if (!entity) return { kind: `${kind}-miss`, message: 'no shift entity found' };
+      const token = options.token || window.__adpAutoLastClickToken || 0;
+      const meta = baseMeta(entity);
+      const sampleDelays = [0, 10, 25, 50, 100, 180, 300, Number(window.__adpAutoDetailDelayMs || 800)];
+      let best = null;
+      let elapsed = 0;
+
+      recordOverlaySnapshot('capture-start');
+      for (const waitMs of sampleDelays) {
+        const delta = Math.max(0, waitMs - elapsed);
+        if (delta) await sleep(delta);
+        elapsed = waitMs;
+        recordOverlaySnapshot(`capture-${waitMs}`);
+        const current = bestDetailCandidate(entity, token);
+        if (current && (!best || current.score > best.score)) best = current;
+        if (best && best.score >= 180 && /\b\d+\.\s*\d{1,2}:\d{2}/i.test(best.compact)) break;
+      }
+
+      if (best && best.score >= 100) {
+        const rowHtml = attachDetail(entity, best.text);
+        return {
+          kind,
+          ...meta,
+          detailText: best.text,
+          candidateScore: best.score,
+          candidateSource: best.source || best.reason || 'unknown',
+          rowHtml,
+          entityHtml: entity.outerHTML,
+          candidateHtml: best.html || '',
+          capturedAt: new Date().toISOString(),
+        };
+      }
+
+      return {
+        kind: `${kind}-miss`,
+        ...meta,
+        token,
+        candidates: candidateElements('miss').slice(0, 8).map(item => ({
+          score: scoreCandidate(item, meta),
+          className: item.className,
+          text: item.compact.slice(0, 500),
+        })),
+        capturedAt: new Date().toISOString(),
+      };
+    }
+
+    window.__adpAutoCaptureShiftDetailTarget = async function captureShiftDetailTarget(targetId, options = {}) {
+      const entity = document.querySelector(`[data-adp-auto-shift-target="${CSS.escape(String(targetId || ''))}"]`);
+      if (!entity) return { kind: 'shift-detail-miss', message: 'target shift entity not found', targetId };
+      window.__adpAutoLastClickedEntity = entity;
+      const token = window.__adpAutoLastClickToken || 0;
+      recordOverlaySnapshot('real-click-start');
+      await sleep(Math.min(150, Math.max(40, Number(options.delayMs || window.__adpAutoDetailDelayMs || 800) / 6)));
+      return captureEntity(entity, 'shift-detail-record', { token });
+    };
+  }, { delayMs: Number(env('ADP_SHIFT_DETAIL_DELAY_MS', '900')) });
+}
+
+async function scrollToBaselineEmployeeRow(page, baselineRow, options = {}) {
+  const delayMs = Number(env('ADP_SCROLL_DELAY_MS', '1000'));
+  const maxPasses = Number(env('ADP_SHIFT_DETAIL_FIND_ROW_MAX_PASSES', '220'));
+  const rowLabel = `${baselineRow.name} | ${baselineRow.primaryJob || ''}`;
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    const result = await page.evaluate(({ row, pass }) => {
+      function cleanText(value) {
+        return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+      function rowName(el) {
+        return cleanText(el.querySelector('[col-id="name"] .location-schedule-employee-cell__name')?.textContent || el.querySelector('[col-id="name"]')?.textContent || '');
+      }
+      function rowPrimaryJob(el) {
+        return cleanText(el.querySelector('[col-id="primaryJob"]')?.textContent || '');
+      }
+      function rowSortIndex(el) {
+        const raw = el.getAttribute('row-index') || '';
+        if (raw === 't-0') return -1;
+        const parsed = Number.parseInt(raw, 10);
+        return Number.isFinite(parsed) ? parsed : 999999;
+      }
+      function scoreScroller(el) {
+        if (!el) return -1;
+        const rect = el.getBoundingClientRect();
+        const overflow = Math.max(0, el.scrollHeight - el.clientHeight);
+        if (overflow < 20 || rect.width < 300 || rect.height < 150) return -1;
+        const className = String(el.className || '');
+        let score = overflow;
+        if (/ag-body-vertical-scroll-viewport/.test(className)) score += 100000;
+        if (/ag-body-viewport/.test(className)) score += 80000;
+        if (/ag-center-cols-viewport/.test(className)) score += 60000;
+        return score;
+      }
+      function gridScroller() {
+        const candidates = [
+          ...document.querySelectorAll('.ag-body-vertical-scroll-viewport, .ag-body-viewport, .ag-center-cols-viewport'),
+          ...Array.from(document.querySelectorAll('*')).filter(el => {
+            const style = window.getComputedStyle(el);
+            return /(auto|scroll)/.test(style.overflowY || '') && el.scrollHeight > el.clientHeight + 80;
+          })
+        ];
+        const seen = new Set();
+        return candidates
+          .filter(el => {
+            if (!el || seen.has(el)) return false;
+            seen.add(el);
+            return scoreScroller(el) > 0;
+          })
+          .sort((a, b) => scoreScroller(b) - scoreScroller(a))[0] || null;
+      }
+      const rows = Array.from(document.querySelectorAll('.ag-floating-top-container > div[role="row"], .ag-center-cols-container > div[role="row"]'));
+      for (const el of rows) {
+        const name = rowName(el);
+        const primaryJob = rowPrimaryJob(el);
+        if (name === row.name && (!row.primaryJob || primaryJob === row.primaryJob)) {
+          const targetId = `adp-auto-row-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          el.setAttribute('data-adp-auto-row-target', targetId);
+          el.scrollIntoView({ block: 'center', inline: 'nearest' });
+          return { found: true, targetId, visibleNames: rows.map(rowName).filter(Boolean), scrollTop: gridScroller()?.scrollTop || 0 };
+        }
+      }
+
+      const scroller = gridScroller();
+      const visible = rows.map(el => ({ name: rowName(el), primaryJob: rowPrimaryJob(el), sortIndex: rowSortIndex(el) })).filter(item => item.name);
+      const indexes = visible.map(item => item.sortIndex).filter(index => index >= 0 && index < 999999);
+      const minIndex = indexes.length ? Math.min(...indexes) : null;
+      const maxIndex = indexes.length ? Math.max(...indexes) : null;
+      if (!scroller) return { found: false, noScroller: true, visibleNames: visible.map(item => item.name) };
+
+      if (pass === 0 && Number.isFinite(row.sortIndex) && row.sortIndex >= 0 && row.sortIndex < 999999) {
+        const sample = rows.find(el => rowSortIndex(el) >= 0);
+        const rowHeight = sample?.getBoundingClientRect?.().height || 40;
+        scroller.scrollTop = Math.max(0, (row.sortIndex - 3) * rowHeight);
+      } else if (minIndex !== null && Number.isFinite(row.sortIndex) && row.sortIndex < minIndex) {
+        scroller.scrollTop = Math.max(0, scroller.scrollTop - Math.max(80, scroller.clientHeight * 0.55));
+      } else {
+        scroller.scrollTop = Math.min(scroller.scrollHeight - scroller.clientHeight, scroller.scrollTop + Math.max(80, scroller.clientHeight * 0.55));
+      }
+      scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return {
+        found: false,
+        visibleNames: visible.map(item => item.name),
+        minIndex,
+        maxIndex,
+        scrollTop: scroller.scrollTop,
+        maxScrollTop: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+      };
+    }, { row: baselineRow, pass });
+
+    if (result.found) return result;
+    const atBottom = result.maxScrollTop !== undefined && Math.abs(result.maxScrollTop - result.scrollTop) < 3;
+    if (atBottom && pass > 5 && !options.allowBottomRetry) break;
+    await page.waitForTimeout(delayMs);
+  }
+
+  throw new Error(`Could not find baseline employee row during shift-detail pass: ${rowLabel}`);
+}
+
+async function captureVisibleBaselineRowDetails(page, baselineRow) {
+  const delayMs = Number(env('ADP_SHIFT_DETAIL_DELAY_MS', '900'));
+  const clickDelayMs = Number(env('ADP_SHIFT_DETAIL_CLICK_DELAY_MS', '150'));
+  const rowTarget = await scrollToBaselineEmployeeRow(page, baselineRow, { allowBottomRetry: true });
+
+  const targetsResult = await page.evaluate(({ rowTargetId }) => {
+    function compactText(value) {
+      return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+    function isVisible(el) {
+      if (!el || !(el instanceof Element)) return false;
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+      const rect = el.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+    function getDayCell(entity) {
+      return entity?.closest?.('[col-id^="day-"]') || null;
+    }
+    function entityOrder(entity) {
+      const dayCell = getDayCell(entity);
+      const dayRaw = dayCell?.getAttribute('col-id') || '';
+      const dayMatch = dayRaw.match(/day-(\d+)/);
+      const day = dayMatch ? Number(dayMatch[1]) : 99;
+      const rect = entity.getBoundingClientRect();
+      return { day, top: rect.top, left: rect.left };
+    }
+    function targetPayload(entity, index) {
+      const rect = entity.getBoundingClientRect();
+      const targetId = `adp-auto-shift-${Date.now()}-${index}-${Math.random().toString(16).slice(2)}`;
+      entity.setAttribute('data-adp-auto-shift-target', targetId);
+      const title = compactText(entity.querySelector('.location-schedule-cell__title')?.textContent || entity.textContent || '');
+      const automationId = entity.getAttribute('automation-id') || '';
+      return {
+        targetId,
+        shiftTitle: title,
+        shiftId: automationId.replace('location_schedule_cell_shift_', '') || automationId,
+        dayCol: getDayCell(entity)?.getAttribute('col-id') || '',
+        rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height },
+      };
+    }
+
+    const row = document.querySelector(`[data-adp-auto-row-target="${CSS.escape(rowTargetId)}"]`);
+    if (!row) return { ok: false, error: 'row target not found' };
+    const entities = Array.from(row.querySelectorAll('.location-schedule-cell__entity, [automation-id^="location_schedule_cell_shift_"]'))
+      .filter(isVisible)
+      .sort((a, b) => {
+        const aa = entityOrder(a);
+        const bb = entityOrder(b);
+        return aa.day - bb.day || aa.top - bb.top || aa.left - bb.left;
+      });
+    return {
+      ok: true,
+      targetRowId: row.getAttribute('row-id') || '',
+      targetRowIndex: row.getAttribute('row-index') || '',
+      targets: entities.map(targetPayload),
+      rowHtml: row.outerHTML,
+    };
+  }, { rowTargetId: rowTarget.targetId });
+
+  if (!targetsResult.ok) {
+    return { ok: false, employeeName: baselineRow.name, primaryJob: baselineRow.primaryJob, error: targetsResult.error, records: [], misses: [], rowHtml: baselineRow.html };
+  }
+
+  const records = [];
+  const misses = [];
+
+  for (const [index, target] of targetsResult.targets.entries()) {
+    const current = await page.evaluate(targetId => {
+      const entity = document.querySelector(`[data-adp-auto-shift-target="${CSS.escape(targetId)}"]`);
+      if (!entity) return null;
+      entity.scrollIntoView({ block: 'center', inline: 'center' });
+      const rect = entity.getBoundingClientRect();
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height };
+    }, target.targetId);
+
+    if (!current || current.width <= 0 || current.height <= 0) {
+      misses.push({ kind: 'shift-detail-miss', ...target, message: 'target shift cell was not visible before real click', capturedAt: new Date().toISOString() });
+      continue;
+    }
+
+    const x = Math.max(1, Math.min(current.right - 2, current.left + Math.min(40, Math.max(8, current.width / 2))));
+    const y = Math.max(1, Math.min(current.bottom - 2, current.top + Math.min(18, Math.max(8, current.height / 2))));
+
+    await page.mouse.move(x, y);
+    await page.waitForTimeout(40);
+    await page.mouse.down();
+    await page.waitForTimeout(20);
+    await page.mouse.up();
+    await page.waitForTimeout(90);
+
+    const record = await page.evaluate(async ({ targetId, delayMs }) => {
+      if (!window.__adpAutoCaptureShiftDetailTarget) return { kind: 'shift-detail-miss', message: 'capture helper missing', targetId };
+      return window.__adpAutoCaptureShiftDetailTarget(targetId, { delayMs });
+    }, { targetId: target.targetId, delayMs });
+
+    if (record?.kind === 'shift-detail-record') records.push(record);
+    else misses.push(record || { kind: 'shift-detail-miss', ...target, message: 'no capture result returned', capturedAt: new Date().toISOString() });
+
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(clickDelayMs);
+    if ((index + 1) % 5 === 0) console.log(`[shift-detail] ${baselineRow.name}: ${index + 1}/${targetsResult.targets.length} clicked`);
+  }
+
+  const rowHtml = await page.evaluate(rowTargetId => {
+    const row = document.querySelector(`[data-adp-auto-row-target="${CSS.escape(rowTargetId)}"]`);
+    return row ? row.outerHTML : '';
+  }, rowTarget.targetId);
+
+  return {
+    ok: misses.length === 0 && records.length === targetsResult.targets.length,
+    employeeName: baselineRow.name,
+    primaryJob: baselineRow.primaryJob,
+    expectedShiftCount: baselineRow.shiftCount,
+    targetShiftCount: targetsResult.targets.length,
+    detailCount: records.length,
+    missCount: misses.length,
+    records,
+    misses,
+    rowHtml: rowHtml || targetsResult.rowHtml || baselineRow.html,
+  };
+}
+
+async function captureShiftBreakdownsFromBaseline(page, baselineCapture) {
+  await installAutoShiftDetailRuntime(page);
+
+  const rows = (baselineCapture?.rows || []).slice().sort((a, b) => {
+    if (a.sortIndex !== b.sortIndex) return a.sortIndex - b.sortIndex;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  const rowsWithShifts = rows.filter(row => Number(row.shiftCount || 0) > 0);
+  const rowRetries = Number(env('ADP_SHIFT_DETAIL_ROW_RETRIES', '2'));
+  const timeoutMs = Number(env('ADP_SHIFT_DETAIL_CAPTURE_TIMEOUT_MS', '3600000'));
+  const started = Date.now();
+  const rowMap = new Map(rows.map(row => [row.key, row.html]));
+  const records = [];
+  const misses = [];
+  let processedRows = 0;
+
+  console.log(`Shift breakdown capture pass: ${rowsWithShifts.length} employee rows with shifts from the baseline capture.`);
+
+  for (const row of rowsWithShifts) {
+    if (timeoutMs > 0 && Date.now() - started > timeoutMs) {
+      throw new Error(`Shift breakdown capture timed out after ${timeoutMs}ms before completing ${row.name}. Processed ${processedRows}/${rowsWithShifts.length} rows.`);
+    }
+
+    let result = null;
+    for (let attempt = 1; attempt <= rowRetries + 1; attempt += 1) {
+      result = await captureVisibleBaselineRowDetails(page, row);
+      if (result.ok && result.detailCount === row.shiftCount) break;
+      console.warn(`[shift-detail] retry ${attempt}/${rowRetries + 1} for ${row.name}: recorded ${result?.detailCount || 0}/${row.shiftCount}, misses ${result?.missCount || 0}`);
+      await page.waitForTimeout(Number(env('ADP_SHIFT_DETAIL_RETRY_DELAY_MS', '900')));
+    }
+
+    if (result?.rowHtml) rowMap.set(row.key, result.rowHtml);
+    records.push(...(result?.records || []));
+    misses.push(...(result?.misses || []));
+    processedRows += 1;
+
+    if (!result?.ok || result.detailCount !== row.shiftCount) {
+      const message = `[shift-detail] incomplete ${row.name} | ${row.primaryJob || ''}: recorded ${result?.detailCount || 0}/${row.shiftCount}`;
+      if (boolEnv('ADP_REQUIRE_FULL_SHIFT_BREAKDOWNS', true)) {
+        throw new Error(`${message}. Refusing to advance because full shift breakdown coverage is required.`);
+      }
+      console.warn(message);
+    } else {
+      console.log(`[shift-detail] completed ${processedRows}/${rowsWithShifts.length}: ${row.name} (${result.detailCount}/${row.shiftCount})`);
+    }
+  }
+
+  const enrichedRows = rows.map(row => ({ ...row, html: rowMap.get(row.key) || row.html }));
+  return {
+    ...baselineCapture,
+    rows: enrichedRows,
+    rowCount: enrichedRows.length,
+    shiftDetailCapture: {
+      processed_employee_rows: processedRows,
+      expected_employee_rows_with_shifts: rowsWithShifts.length,
+      captured_shift_detail_count: records.length,
+      shift_detail_miss_count: misses.length,
+      complete: processedRows === rowsWithShifts.length && misses.length === 0,
+      records_preview: records.slice(0, 12).map(record => ({ employeeName: record.employeeName, shiftTitle: record.shiftTitle })),
+      misses_preview: misses.slice(0, 12).map(miss => ({ employeeName: miss.employeeName, shiftTitle: miss.shiftTitle, message: miss.message })),
+    }
+  };
 }
 
 function injectCapturedVirtualRows(html, virtualGridCapture) {
@@ -1328,9 +1958,15 @@ async function saveCapture(page, outputDir, virtualGridCapture = null) {
     virtual_grid_capture: virtualGridCapture ? {
       expected_employee_count: virtualGridCapture.expectedEmployeeCount,
       captured_row_count: virtualGridCapture.rowCount,
+      complete: Boolean(virtualGridCapture.complete),
+      max_sort_index: virtualGridCapture.maxSortIndex ?? null,
       used_scroller: virtualGridCapture.usedScroller,
       captured_names_preview: virtualGridCapture.rows.slice(0, 8).map(row => row.name),
-    } : null
+      captured_names_tail: virtualGridCapture.rows.slice(-8).map(row => row.name),
+      shift_detail_capture: virtualGridCapture.shiftDetailCapture || null,
+    } : null,
+    captured_shift_detail_count: virtualGridCapture?.shiftDetailCapture?.captured_shift_detail_count || 0,
+    shift_detail_miss_count: virtualGridCapture?.shiftDetailCapture?.shift_detail_miss_count || 0
   };
   await fs.writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf8');
   return { htmlPath, latestPath, textPath, screenshotPath, metadataPath };
@@ -1451,7 +2087,16 @@ async function main() {
       const currentRange = await readScheduleDateRange(page);
       console.log(`\nCapturing week ${weekIndex + 1}/${weeksToCapture}${currentRange ? `: ${currentRange}` : ''}`);
 
-      const virtualGridCapture = await collectVirtualGridRows(page);
+      let virtualGridCapture = await collectVirtualGridRows(page);
+      if (boolEnv('ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE', true) && virtualGridCapture.expectedEmployeeCount && !virtualGridCapture.complete) {
+        throw new Error(`Baseline capture did not include every employee for ${currentRange || `week ${weekIndex + 1}`}: captured ${virtualGridCapture.rowCount}/${virtualGridCapture.expectedEmployeeCount}; last visible ${virtualGridCapture.scrollStats?.lastVisibleName || 'unknown'}. Refusing to publish incomplete calendars.`);
+      }
+
+      if (shiftDetailEnabled()) {
+        console.log('Starting second pass for shift breakdowns from the complete baseline employee list...');
+        virtualGridCapture = await captureShiftBreakdownsFromBaseline(page, virtualGridCapture);
+      }
+
       latestSaved = await saveCapture(page, outputDir, virtualGridCapture);
       savedHtmlPaths.push(latestSaved.htmlPath);
 

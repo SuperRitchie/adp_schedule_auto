@@ -58,6 +58,7 @@ class ShiftRecord:
     end_datetime: str
     hours: float | None
     raw_shift_text: str
+    shift_detail: str
     shift_id: str
     is_transfer: bool
 
@@ -66,6 +67,15 @@ def clean_text(value: str | None) -> str:
     if not value:
         return ""
     return re.sub(r"\s+", " ", value).strip()
+
+
+def clean_multiline_text(value: str | None) -> str:
+    if not value:
+        return ""
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.split("\n")]
+    lines = [line for line in lines if line]
+    return "\n".join(lines)
 
 
 def slugify_name(name: str) -> str:
@@ -166,6 +176,12 @@ def parse_shift_entities(
 
         automation_id = entity.get("automation-id", "")
         shift_id = automation_id.replace("location_schedule_cell_shift_", "") if automation_id else f"{day_col}-{index}"
+        shift_detail = clean_multiline_text(
+            entity.get("data-adp-shift-detail")
+            or entity.get("data-adp-auto-shift-detail")
+            or entity.get("data-adp-manual-shift-detail")
+            or ""
+        )
         shift_box = entity.select_one(".location-schedule-cell__shift")
         shift_classes = shift_box.get("class", []) if shift_box else []
         is_transfer = "location-schedule-cell__transfer-bar" in shift_classes or entity.select_one(".icon-k-transfer") is not None
@@ -186,6 +202,7 @@ def parse_shift_entities(
                 end_datetime=end_dt.isoformat(timespec="minutes"),
                 hours=hours,
                 raw_shift_text=raw,
+                shift_detail=shift_detail,
                 shift_id=shift_id,
                 is_transfer=is_transfer,
             )
@@ -283,8 +300,7 @@ def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
 
 
 def dedupe_records(records: list[ShiftRecord]) -> list[ShiftRecord]:
-    seen: set[tuple] = set()
-    deduped: list[ShiftRecord] = []
+    by_key: dict[tuple, ShiftRecord] = {}
     for rec in records:
         key = (
             rec.employee_name,
@@ -293,11 +309,18 @@ def dedupe_records(records: list[ShiftRecord]) -> list[ShiftRecord]:
             rec.end_time,
             rec.shift_id,
         )
-        if key in seen:
+        existing = by_key.get(key)
+        if existing is None:
+            by_key[key] = rec
             continue
-        seen.add(key)
-        deduped.append(rec)
-    return deduped
+
+        # prefer the copy enriched with a full shift breakdown, then prefer the longer detail text
+        existing_detail_len = len(existing.shift_detail or "")
+        rec_detail_len = len(rec.shift_detail or "")
+        if rec_detail_len > existing_detail_len:
+            by_key[key] = rec
+
+    return list(by_key.values())
 
 
 def group_by_employee(records: list[ShiftRecord]) -> list[dict]:
@@ -412,6 +435,8 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
             f"Source: {shift.get('source_file', '')}",
             f"Raw: {shift.get('raw_shift_text', '')}",
         ]
+        if shift.get('shift_detail'):
+            description_parts.append(f"Shift breakdown:\n{shift.get('shift_detail', '')}")
         if shift.get('is_transfer'):
             description_parts.append('Transfer: yes')
 
@@ -496,6 +521,8 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
         "calendar_location": location,
         "calendar_alarm_minutes_before_shift": alarm_minutes,
         "calendar_refresh_minutes": refresh_minutes,
+        "shifts_with_detail_count": sum(1 for rec in records if rec.shift_detail),
+        "shifts_missing_detail_count": sum(1 for rec in records if not rec.shift_detail),
         "output_files": ["shifts.csv", "shifts.json", "employees.json", "calendar_index.json", "calendars/*.ics", "parse_summary.json"],
     }
     (out_dir / "parse_summary.json").write_text(

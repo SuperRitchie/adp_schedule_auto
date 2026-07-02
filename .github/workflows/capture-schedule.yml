@@ -16,7 +16,7 @@ concurrency:
 jobs:
   capture-and-upload:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 300
 
     steps:
       - name: Check out repository
@@ -131,7 +131,16 @@ jobs:
           ADP_SELECT_ALL_JOBS: "true"
           ADP_FILTER_DELAY_MS: "700"
           ADP_WEEKS_TO_CAPTURE: "4"
-          ADP_SCROLL_DELAY_MS: "500"
+          # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
+          ADP_CAPTURE_SHIFT_DETAILS: "true"
+          ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
+          ADP_REQUIRE_FULL_SHIFT_BREAKDOWNS: "true"
+          ADP_SCROLL_DELAY_MS: "1500"
+          ADP_SHIFT_DETAIL_DELAY_MS: "900"
+          ADP_SHIFT_DETAIL_CLICK_DELAY_MS: "150"
+          ADP_SHIFT_DETAIL_CAPTURE_TIMEOUT_MS: "3600000"
+          ADP_SHIFT_DETAIL_ROW_RETRIES: "2"
+          ADP_SHIFT_DETAIL_FIND_ROW_MAX_PASSES: "240"
           ADP_NEXT_WEEK_DELAY_MS: "1500"
           ADP_NEXT_WEEK_TIMEOUT_MS: "45000"
           ADP_POST_LOGIN_TIMEOUT_MS: "120000"
@@ -153,6 +162,28 @@ jobs:
             echo "Running headless Chromium."
             node adp_schedule_auto.js
           fi
+
+      - name: Check full shift breakdown coverage
+        run: |
+          set -euo pipefail
+          grep -n "captured_shift_detail_count" captures/*.metadata.json
+          grep -n "shift_detail_miss_count" captures/*.metadata.json
+          python3 - <<'PY'
+          from pathlib import Path
+
+          matches = []
+          for path in Path("parsed_schedule/calendars").glob("*.ics"):
+              text = path.read_text(encoding="utf-8", errors="ignore")
+              if "Shift breakdown" in text:
+                  matches.append(str(path))
+
+          print("calendar files with shift breakdown:", len(matches))
+          for item in matches[:20]:
+              print(item)
+
+          if not matches:
+              raise SystemExit("no calendar descriptions contained Shift breakdown")
+          PY
 
       - name: Upload parsed schedule outputs to Google Drive
         env:
