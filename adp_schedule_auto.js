@@ -1433,6 +1433,7 @@ async function installAutoShiftDetailRuntime(page) {
     window.__adpAutoShiftDetailRuntimeInstalled = true;
     window.__adpAutoDetailDelayMs = delayMs;
     window.__adpAutoOverlaySnapshots = [];
+    window.__adpAutoRecordedDetails = [];
     window.__adpAutoLastClickedEntity = null;
     window.__adpAutoLastClickToken = 0;
 
@@ -1465,6 +1466,29 @@ async function installAutoShiftDetailRuntime(page) {
 
     function getDayCell(entity) {
       return entity?.closest?.('[col-id^="day-"]') || null;
+    }
+
+    function entityFromTarget(target) {
+      if (!target || !(target instanceof Element)) return null;
+      return target.closest('.location-schedule-cell__entity, [automation-id^="location_schedule_cell_shift_"]');
+    }
+
+    function storedRecordForTarget(targetId) {
+      const id = String(targetId || '');
+      if (!id) return null;
+      const matches = (window.__adpAutoRecordedDetails || [])
+        .filter(item => item?.kind === 'shift-detail-record' && item.targetId === id && item.detailText)
+        .sort((a, b) => String(b.capturedAt || '').localeCompare(String(a.capturedAt || '')));
+      return matches[0] || null;
+    }
+
+    function rememberRecordedDetail(item) {
+      if (!item) return item;
+      window.__adpAutoRecordedDetails.push(item);
+      if (window.__adpAutoRecordedDetails.length > 500) {
+        window.__adpAutoRecordedDetails.splice(0, window.__adpAutoRecordedDetails.length - 500);
+      }
+      return item;
     }
 
     function baseMeta(entity) {
@@ -1603,7 +1627,7 @@ async function installAutoShiftDetailRuntime(page) {
         .filter(item => !token || !item.token || item.token === token)
         .map(item => ({ ...item, score: scoreCandidate(item, meta), source: 'snapshot' }));
       const candidates = [...liveCandidates, ...snapshotCandidates]
-        .filter(item => item.score >= 90)
+        .filter(item => item.score >= 80)
         .sort((a, b) => b.score - a.score || b.compact.length - a.compact.length);
       return candidates[0] || null;
     }
@@ -1618,7 +1642,8 @@ async function installAutoShiftDetailRuntime(page) {
 
     async function captureEntity(entity, kind, options = {}) {
       if (!entity) return { kind: `${kind}-miss`, message: 'no shift entity found' };
-      const token = options.token || window.__adpAutoLastClickToken || 0;
+      const token = options.token || Number(entity.getAttribute('data-adp-auto-click-token') || '') || window.__adpAutoLastClickToken || 0;
+      const targetId = entity.getAttribute('data-adp-auto-shift-target') || '';
       const meta = baseMeta(entity);
       const sampleDelays = [0, 10, 25, 50, 100, 180, 300, Number(window.__adpAutoDetailDelayMs || 800)];
       let best = null;
@@ -1637,9 +1662,11 @@ async function installAutoShiftDetailRuntime(page) {
 
       if (best && best.score >= 100) {
         const rowHtml = attachDetail(entity, best.text);
-        return {
+        return rememberRecordedDetail({
           kind,
           ...meta,
+          targetId,
+          token,
           detailText: best.text,
           candidateScore: best.score,
           candidateSource: best.source || best.reason || 'unknown',
@@ -1647,12 +1674,13 @@ async function installAutoShiftDetailRuntime(page) {
           entityHtml: entity.outerHTML,
           candidateHtml: best.html || '',
           capturedAt: new Date().toISOString(),
-        };
+        });
       }
 
-      return {
+      return rememberRecordedDetail({
         kind: `${kind}-miss`,
         ...meta,
+        targetId,
         token,
         candidates: candidateElements('miss').slice(0, 8).map(item => ({
           score: scoreCandidate(item, meta),
@@ -1660,17 +1688,41 @@ async function installAutoShiftDetailRuntime(page) {
           text: item.compact.slice(0, 500),
         })),
         capturedAt: new Date().toISOString(),
-      };
+      });
     }
 
+    document.addEventListener('click', event => {
+      const entity = entityFromTarget(event.target);
+      if (!entity) return;
+      window.__adpAutoLastClickedEntity = entity;
+      window.__adpAutoLastClickToken += 1;
+      const token = window.__adpAutoLastClickToken;
+      entity.setAttribute('data-adp-auto-click-token', String(token));
+      setTimeout(() => recordOverlaySnapshot('after-click-0'), 0);
+      setTimeout(() => recordOverlaySnapshot('after-click-20'), 20);
+      setTimeout(() => recordOverlaySnapshot('after-click-60'), 60);
+      setTimeout(() => captureEntity(entity, 'shift-detail-record', { token }), 0);
+    }, true);
+
     window.__adpAutoCaptureShiftDetailTarget = async function captureShiftDetailTarget(targetId, options = {}) {
+      const existingBefore = storedRecordForTarget(targetId);
+      if (existingBefore) return existingBefore;
       const entity = document.querySelector(`[data-adp-auto-shift-target="${CSS.escape(String(targetId || ''))}"]`);
       if (!entity) return { kind: 'shift-detail-miss', message: 'target shift entity not found', targetId };
       window.__adpAutoLastClickedEntity = entity;
-      const token = window.__adpAutoLastClickToken || 0;
+      let token = Number(entity.getAttribute('data-adp-auto-click-token') || '') || window.__adpAutoLastClickToken || 0;
+      if (!token) {
+        window.__adpAutoLastClickToken += 1;
+        token = window.__adpAutoLastClickToken;
+        entity.setAttribute('data-adp-auto-click-token', String(token));
+      }
       recordOverlaySnapshot('real-click-start');
-      await sleep(Math.min(150, Math.max(40, Number(options.delayMs || window.__adpAutoDetailDelayMs || 800) / 6)));
-      return captureEntity(entity, 'shift-detail-record', { token });
+      await sleep(Math.min(180, Math.max(50, Number(options.delayMs || window.__adpAutoDetailDelayMs || 800) / 5)));
+      const existingAfterClick = storedRecordForTarget(targetId);
+      if (existingAfterClick) return existingAfterClick;
+      const directRecord = await captureEntity(entity, 'shift-detail-record', { token });
+      if (directRecord?.kind === 'shift-detail-record') return directRecord;
+      return storedRecordForTarget(targetId) || directRecord;
     };
   }, { delayMs: Number(env('ADP_SHIFT_DETAIL_DELAY_MS', '900')) });
 }
@@ -1869,6 +1921,8 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
       if (!entity) return;
       window.__adpAutoLastClickedEntity = entity;
       window.__adpAutoLastClickToken = (window.__adpAutoLastClickToken || 0) + 1;
+      entity.setAttribute('data-adp-auto-click-token', String(window.__adpAutoLastClickToken));
+      window.__adpAutoRecordedDetails = (window.__adpAutoRecordedDetails || []).filter(item => item.targetId !== targetId);
     }, target.targetId);
 
     await page.mouse.move(x, y);
