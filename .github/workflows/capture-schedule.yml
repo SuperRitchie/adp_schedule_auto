@@ -2,6 +2,9 @@ name: Capture ADP schedule and upload to Google Drive
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types:
+      - mec_schedule_posted
   schedule:
     # GitHub schedules run in UTC. This is 5:17 AM Vancouver during daylight time.
     - cron: "17 12 * * *"
@@ -21,6 +24,15 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+
+      - name: Log email dispatch trigger
+        if: github.event_name == 'repository_dispatch'
+        run: |
+          echo "Repository dispatch event: ${{ github.event.action }}"
+          echo "MEC mailbox: ${{ github.event.client_payload.mailbox }}"
+          echo "Schedule email subject: ${{ github.event.client_payload.subject }}"
+          echo "Source: ${{ github.event.client_payload.source }}"
+
 
       - name: Set up Node.js
         uses: actions/setup-node@v6
