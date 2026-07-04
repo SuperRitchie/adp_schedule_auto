@@ -144,6 +144,8 @@ jobs:
           ADP_FILTER_DELAY_MS: "700"
           ADP_WEEKS_TO_CAPTURE: "1"
           ADP_SKIP_PARSE: "true"
+          ADP_WEEK_CAPTURE_ATTEMPTS: "3"
+          ADP_RETRY_SLEEP_SECONDS: "45"
           # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
           ADP_CAPTURE_SHIFT_DETAILS: "true"
           ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
@@ -170,21 +172,63 @@ jobs:
         run: |
           set -euo pipefail
 
+          max_attempts="${ADP_WEEK_CAPTURE_ATTEMPTS:-3}"
+          retry_sleep_seconds="${ADP_RETRY_SLEEP_SECONDS:-45}"
+
           for ADP_START_WEEK_OFFSET in 0 1 2 3; do
-            echo "::group::Capture ADP week offset ${ADP_START_WEEK_OFFSET}"
             export ADP_START_WEEK_OFFSET
             export OUTPUT_DIR="captures/week_${ADP_START_WEEK_OFFSET}"
             export PARSED_OUT_DIR="parsed_schedule_week_${ADP_START_WEEK_OFFSET}"
-            rm -rf "$OUTPUT_DIR" "$PARSED_OUT_DIR"
 
-            if [ "${ADP_HEADLESS}" = "false" ]; then
-              echo "Running headed Chromium under xvfb-run for week offset ${ADP_START_WEEK_OFFSET}."
-              xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
-            else
-              echo "Running headless Chromium for week offset ${ADP_START_WEEK_OFFSET}."
-              node adp_schedule_auto.js
+            attempt=1
+            last_status=0
+            captured_week=0
+
+            while [ "$attempt" -le "$max_attempts" ]; do
+              echo "::group::Capture ADP week offset ${ADP_START_WEEK_OFFSET} attempt ${attempt}/${max_attempts}"
+              rm -rf "$OUTPUT_DIR" "$PARSED_OUT_DIR"
+
+              set +e
+              if [ "${ADP_HEADLESS}" = "false" ]; then
+                echo "Running headed Chromium under xvfb-run for week offset ${ADP_START_WEEK_OFFSET}."
+                xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
+                last_status=$?
+              else
+                echo "Running headless Chromium for week offset ${ADP_START_WEEK_OFFSET}."
+                node adp_schedule_auto.js
+                last_status=$?
+              fi
+              set -e
+              echo "::endgroup::"
+
+              if [ "$last_status" -eq 0 ]; then
+                captured_week=1
+                echo "Week offset ${ADP_START_WEEK_OFFSET} succeeded on attempt ${attempt}/${max_attempts}."
+                break
+              fi
+
+              echo "Week offset ${ADP_START_WEEK_OFFSET} failed on attempt ${attempt}/${max_attempts} with status ${last_status}." >&2
+
+              if [ -d "$OUTPUT_DIR" ]; then
+                failed_output_dir="captures/retry_failures/week_${ADP_START_WEEK_OFFSET}_attempt_${attempt}"
+                rm -rf "$failed_output_dir"
+                mkdir -p "$(dirname "$failed_output_dir")"
+                mv "$OUTPUT_DIR" "$failed_output_dir" || true
+                echo "Saved failed attempt artifacts to ${failed_output_dir}." >&2
+              fi
+
+              if [ "$attempt" -lt "$max_attempts" ]; then
+                echo "Sleeping ${retry_sleep_seconds}s before retrying week offset ${ADP_START_WEEK_OFFSET}." >&2
+                sleep "$retry_sleep_seconds"
+              fi
+
+              attempt=$((attempt + 1))
+            done
+
+            if [ "$captured_week" -ne 1 ]; then
+              echo "Week offset ${ADP_START_WEEK_OFFSET} failed after ${max_attempts} attempts." >&2
+              exit "$last_status"
             fi
-            echo "::endgroup::"
           done
 
       - name: Parse merged schedule outputs
@@ -276,9 +320,33 @@ jobs:
           # Fallback only for real Google Shared Drives, not normal shared My Drive folders.
           GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 }}
         run: |
-          python3 scripts/upload_to_drive.py \
-            --source-dir parsed_schedule \
-            --folder-id "$GOOGLE_DRIVE_FOLDER_ID"
+          set -euo pipefail
+          max_attempts="${DRIVE_UPLOAD_ATTEMPTS:-3}"
+          retry_sleep_seconds="${DRIVE_UPLOAD_RETRY_SLEEP_SECONDS:-45}"
+          attempt=1
+
+          while [ "$attempt" -le "$max_attempts" ]; do
+            echo "Google Drive upload attempt ${attempt}/${max_attempts}."
+            set +e
+            python3 scripts/upload_to_drive.py \
+              --source-dir parsed_schedule \
+              --folder-id "$GOOGLE_DRIVE_FOLDER_ID"
+            status=$?
+            set -e
+
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+
+            echo "Google Drive upload failed on attempt ${attempt}/${max_attempts} with status ${status}." >&2
+            if [ "$attempt" -lt "$max_attempts" ]; then
+              echo "Sleeping ${retry_sleep_seconds}s before retrying Google Drive upload." >&2
+              sleep "$retry_sleep_seconds"
+            fi
+            attempt=$((attempt + 1))
+          done
+
+          exit "$status"
 
       - name: Build subscribable calendar website files
         env:
