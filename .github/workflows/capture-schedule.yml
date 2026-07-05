@@ -146,6 +146,7 @@ jobs:
           ADP_SKIP_PARSE: "true"
           ADP_WEEK_CAPTURE_ATTEMPTS: "3"
           ADP_RETRY_SLEEP_SECONDS: "45"
+          ADP_CAPTURE_ATTEMPT_TIMEOUT_SECONDS: "7200"
           # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
           ADP_CAPTURE_SHIFT_DETAILS: "true"
           ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
@@ -174,6 +175,16 @@ jobs:
 
           max_attempts="${ADP_WEEK_CAPTURE_ATTEMPTS:-3}"
           retry_sleep_seconds="${ADP_RETRY_SLEEP_SECONDS:-45}"
+          attempt_timeout_seconds="${ADP_CAPTURE_ATTEMPT_TIMEOUT_SECONDS:-7200}"
+
+          cleanup_adp_browser_runtime() {
+            label="${1:-cleanup}"
+            echo "Cleaning up ADP browser runtime after ${label}."
+            pkill -TERM -f 'chrome|chromium|ms-playwright|playwright' 2>/dev/null || true
+            sleep 5
+            pkill -KILL -f 'chrome|chromium|ms-playwright|playwright' 2>/dev/null || true
+            rm -rf "${RUNNER_TEMP:-/tmp}"/adp-capture-week-* 2>/dev/null || true
+          }
 
           for ADP_START_WEEK_OFFSET in 0 1 2 3; do
             export ADP_START_WEEK_OFFSET
@@ -186,19 +197,32 @@ jobs:
 
             while [ "$attempt" -le "$max_attempts" ]; do
               echo "::group::Capture ADP week offset ${ADP_START_WEEK_OFFSET} attempt ${attempt}/${max_attempts}"
+              cleanup_adp_browser_runtime "starting week ${ADP_START_WEEK_OFFSET} attempt ${attempt}"
               rm -rf "$OUTPUT_DIR" "$PARSED_OUT_DIR"
 
+              attempt_runtime_dir="${RUNNER_TEMP:-/tmp}/adp-capture-week-${ADP_START_WEEK_OFFSET}-attempt-${attempt}"
+              rm -rf "$attempt_runtime_dir"
+              mkdir -p "$attempt_runtime_dir/tmp" "$attempt_runtime_dir/profile"
+
               set +e
-              if [ "${ADP_HEADLESS}" = "false" ]; then
-                echo "Running headed Chromium under xvfb-run for week offset ${ADP_START_WEEK_OFFSET}."
-                xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" node adp_schedule_auto.js
-                last_status=$?
-              else
-                echo "Running headless Chromium for week offset ${ADP_START_WEEK_OFFSET}."
-                node adp_schedule_auto.js
-                last_status=$?
-              fi
+              (
+                export TMPDIR="$attempt_runtime_dir/tmp"
+                export ADP_PROFILE_DIR="$attempt_runtime_dir/profile"
+                export ADP_ATTEMPT_RUNTIME_DIR="$attempt_runtime_dir"
+
+                if [ "${ADP_HEADLESS}" = "false" ]; then
+                  echo "Running headed Chromium under a fresh xvfb-run session for week offset ${ADP_START_WEEK_OFFSET}."
+                  timeout --foreground --kill-after=30s "$attempt_timeout_seconds" \
+                    xvfb-run -a --server-args="-screen 0 ${ADP_WINDOW_WIDTH:-1600}x${ADP_WINDOW_HEIGHT:-1000}x24" \
+                    node adp_schedule_auto.js
+                else
+                  echo "Running headless Chromium in a fresh process for week offset ${ADP_START_WEEK_OFFSET}."
+                  timeout --foreground --kill-after=30s "$attempt_timeout_seconds" node adp_schedule_auto.js
+                fi
+              )
+              last_status=$?
               set -e
+              cleanup_adp_browser_runtime "week ${ADP_START_WEEK_OFFSET} attempt ${attempt}"
               echo "::endgroup::"
 
               if [ "$last_status" -eq 0 ]; then
@@ -238,7 +262,7 @@ jobs:
           CALENDAR_REFRESH_MINUTES: "60"
         run: |
           set -euo pipefail
-          mapfile -t html_files < <(find captures -path "*/schedule_*.html" -type f | sort)
+          mapfile -t html_files < <(find captures -path "captures/retry_failures" -prune -o -path "*/schedule_*.html" -type f -print | sort)
           printf 'Captured HTML files for final parse:\n'
           printf '  %s\n' "${html_files[@]}"
           if [ "${#html_files[@]}" -ne 4 ]; then
