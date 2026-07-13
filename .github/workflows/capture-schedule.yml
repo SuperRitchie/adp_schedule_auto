@@ -7,7 +7,9 @@ on:
       - mec_schedule_posted
   schedule:
     # GitHub schedules run in UTC. This is 5:17 AM Vancouver during daylight time.
+    # And once at 5:17 PM
     - cron: "17 12 * * *"
+    - cron: "17 2 * * *"
 
 permissions:
   contents: read
