@@ -1083,6 +1083,36 @@ async function ensureAllLocationsAndJobsSelected(page) {
   console.log(`Locations/jobs filter updated: ${beforeLabel || 'unknown'} -> ${afterLabel || 'unknown'}.`);
 }
 
+
+function selectedJobsCountFromLabel(label) {
+  const text = cleanOneLine(label);
+  const match = text.match(/\b(\d+)\s+jobs?\s+selected\b/i);
+  if (match) return Number.parseInt(match[1], 10);
+  if (/\bnone selected\b/i.test(text)) return 0;
+  return null;
+}
+
+async function validateScheduleCaptureReady(page) {
+  const dateRange = await readScheduleDateRange(page);
+  const jobsLabel = await getLocationJobsLabel(page);
+  const selectedJobsCount = selectedJobsCountFromLabel(jobsLabel);
+  const visibleText = await getVisibleText(page);
+  const employeeCountMatch = visibleText.match(/\bName\s*\[\s*(\d+)\s*\]/i);
+  const employeeCount = employeeCountMatch ? Number.parseInt(employeeCountMatch[1], 10) : 0;
+  const minimumEmployees = Number(env('ADP_MIN_EXPECTED_EMPLOYEES', '20'));
+
+  const problems = [];
+  if (!dateRange) problems.push('schedule date range is missing');
+  if (selectedJobsCount === 0) problems.push(`locations/jobs filter is ${jobsLabel || 'empty'}`);
+  if (employeeCount < minimumEmployees) problems.push(`employee header count is ${employeeCount}, below minimum ${minimumEmployees}`);
+
+  if (problems.length) {
+    throw new Error(`Schedule page is not ready for capture: ${problems.join('; ')}. This attempt will be retried from a fresh browser session.`);
+  }
+
+  return { dateRange, jobsLabel, selectedJobsCount, employeeCount };
+}
+
 async function clickNextScheduleWeek(page) {
   const beforeRange = await readScheduleDateRange(page);
   const timeoutMs = Number(env('ADP_NEXT_WEEK_TIMEOUT_MS', '45000'));
@@ -2256,11 +2286,16 @@ async function main() {
       await ensureAllLocationsAndJobsSelected(page);
       await waitForScheduleGridReady(page);
 
-      const currentRange = await readScheduleDateRange(page);
-      console.log(`\nCapturing week ${weekIndex + 1}/${weeksToCapture}${currentRange ? `: ${currentRange}` : ''}`);
+      const readiness = await validateScheduleCaptureReady(page);
+      const currentRange = readiness.dateRange;
+      console.log(`\nCapturing week ${weekIndex + 1}/${weeksToCapture}: ${currentRange}`);
+      console.log(`Validated schedule page: ${readiness.employeeCount} employees, ${readiness.jobsLabel || 'jobs selected'}.`);
 
       let virtualGridCapture = await collectVirtualGridRows(page);
-      if (boolEnv('ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE', true) && virtualGridCapture.expectedEmployeeCount && !virtualGridCapture.complete) {
+      if (virtualGridCapture.expectedEmployeeCount < Number(env('ADP_MIN_EXPECTED_EMPLOYEES', '20'))) {
+        throw new Error(`Baseline capture returned an implausible employee count (${virtualGridCapture.expectedEmployeeCount}) for ${currentRange}. This attempt will be retried from a fresh browser session.`);
+      }
+      if (boolEnv('ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE', true) && !virtualGridCapture.complete) {
         throw new Error(`Baseline capture did not include every employee for ${currentRange || `week ${weekIndex + 1}`}: captured ${virtualGridCapture.rowCount}/${virtualGridCapture.expectedEmployeeCount}; last visible ${virtualGridCapture.scrollStats?.lastVisibleName || 'unknown'}. Refusing to publish incomplete calendars.`);
       }
 

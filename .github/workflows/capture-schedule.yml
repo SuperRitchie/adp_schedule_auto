@@ -150,6 +150,7 @@ jobs:
           # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
           ADP_CAPTURE_SHIFT_DETAILS: "true"
           ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
+          ADP_MIN_EXPECTED_EMPLOYEES: "20"
           ADP_REQUIRE_FULL_SHIFT_BREAKDOWNS: "true"
           ADP_SCROLL_DELAY_MS: "1500"
           ADP_SHIFT_DETAIL_DELAY_MS: "900"
