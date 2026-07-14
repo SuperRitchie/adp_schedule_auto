@@ -147,7 +147,10 @@ jobs:
           ADP_SKIP_PARSE: "true"
           ADP_WEEK_CAPTURE_ATTEMPTS: "3"
           ADP_RETRY_SLEEP_SECONDS: "45"
+          ADP_FORBIDDEN_RETRY_SLEEP_SECONDS: "300"
           ADP_CAPTURE_ATTEMPT_TIMEOUT_SECONDS: "7200"
+          ADP_TEAM_SCHEDULE_LAUNCH_ATTEMPTS: "3"
+          ADP_TEAM_SCHEDULE_LAUNCH_RETRY_DELAY_MS: "15000"
           # first pass collects the full employee list; second pass enriches each shift with the grey popup breakdown
           ADP_CAPTURE_SHIFT_DETAILS: "true"
           ADP_REQUIRE_FULL_EMPLOYEE_CAPTURE: "true"
@@ -235,6 +238,12 @@ jobs:
 
               echo "Week offset ${ADP_START_WEEK_OFFSET} failed on attempt ${attempt}/${max_attempts} with status ${last_status}." >&2
 
+              attempt_retry_sleep_seconds="$retry_sleep_seconds"
+              if [ -d "$OUTPUT_DIR" ] && grep -Rqi "403 Forbidden" "$OUTPUT_DIR" 2>/dev/null; then
+                attempt_retry_sleep_seconds="${ADP_FORBIDDEN_RETRY_SLEEP_SECONDS:-300}"
+                echo "UKG/Kronos returned 403 Forbidden. Waiting longer before the next fresh-browser attempt." >&2
+              fi
+
               if [ -d "$OUTPUT_DIR" ]; then
                 failed_output_dir="captures/retry_failures/week_${ADP_START_WEEK_OFFSET}_attempt_${attempt}"
                 rm -rf "$failed_output_dir"
@@ -244,8 +253,8 @@ jobs:
               fi
 
               if [ "$attempt" -lt "$max_attempts" ]; then
-                echo "Sleeping ${retry_sleep_seconds}s before retrying week offset ${ADP_START_WEEK_OFFSET}." >&2
-                sleep "$retry_sleep_seconds"
+                echo "Sleeping ${attempt_retry_sleep_seconds}s before retrying week offset ${ADP_START_WEEK_OFFSET}." >&2
+                sleep "$attempt_retry_sleep_seconds"
               fi
 
               attempt=$((attempt + 1))

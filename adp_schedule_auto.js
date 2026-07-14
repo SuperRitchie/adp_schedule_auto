@@ -588,9 +588,8 @@ async function clickButtonLike(page, patterns, timeout = 1500) {
 async function attemptLogin(page) {
   const username = credentialEnv('ADP_USERNAME');
   const password = credentialEnv('ADP_PASSWORD');
-  console.log('The below should be the values that are inputted');
-  console.log(username);
-  console.log(password);
+  console.log(`ADP username available: ${Boolean(username)}`);
+  console.log(`ADP password available: ${Boolean(password)}`);
   if (!username || !password) {
     console.log('No ADP credentials found in environment. Set ADP_USERNAME/ADP_PASSWORD or ADP_USERNAME_B64/ADP_PASSWORD_B64. Using existing browser session or manual login.');
     return;
@@ -968,6 +967,34 @@ async function navigateToWorkFeaturesPage(page, context) {
   return page;
 }
 
+async function pageShowsForbidden(page) {
+  const [title, text] = await Promise.all([
+    page.title().catch(() => ''),
+    getVisibleText(page),
+  ]);
+  return /\b403\b/.test(title) || /\b403\s+Forbidden\b/i.test(text);
+}
+
+async function restoreWorkFeaturesPage(page, context) {
+  const workFeaturesUrl = env('ADP_WORK_FEATURES_URL', DEFAULT_WORK_FEATURES_URL);
+  const openPages = context.pages().filter(candidate => !candidate.isClosed());
+  let workFeaturesPage = openPages.find(candidate => /my\.adp\.com/i.test(candidate.url())) || null;
+
+  if (!workFeaturesPage) {
+    workFeaturesPage = page && !page.isClosed() ? page : await context.newPage();
+  }
+
+  await workFeaturesPage.bringToFront().catch(() => {});
+  if (!/my\.adp\.com/i.test(workFeaturesPage.url())) {
+    await workFeaturesPage.goto(workFeaturesUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
+  } else if (!/myworkfeatures/i.test(workFeaturesPage.url())) {
+    await workFeaturesPage.goto(workFeaturesUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
+  }
+  await workFeaturesPage.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
+  await workFeaturesPage.waitForTimeout(3000);
+  return workFeaturesPage;
+}
+
 async function navigateToTeamSchedule(page, context) {
   page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
 
@@ -977,30 +1004,56 @@ async function navigateToTeamSchedule(page, context) {
     await page.goto(directUrl, { waitUntil: 'domcontentloaded', timeout: 90_000 });
     await page.waitForLoadState('networkidle', { timeout: 20_000 }).catch(() => {});
     page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
+    if (await pageShowsForbidden(page)) {
+      throw new Error('UKG/Kronos returned 403 Forbidden for TEAM_SCHEDULE_URL');
+    }
     return page;
   }
 
   const text = env('TEAM_SCHEDULE_TEXT', 'Team Schedule');
-  console.log(`Looking for Team Schedule tile/button: ${text}`);
+  const launchAttempts = numberEnv('ADP_TEAM_SCHEDULE_LAUNCH_ATTEMPTS', 3);
+  const launchRetryDelayMs = numberEnv('ADP_TEAM_SCHEDULE_LAUNCH_RETRY_DELAY_MS', 15000);
+  let workFeaturesPage = page;
 
-  const popupPromise = page.waitForEvent('popup', { timeout: 7000 }).catch(() => null);
-  const clicked = await clickButtonLike(page, [new RegExp(`Go to\\s+${text}`, 'i'), new RegExp(text, 'i')], 1500);
-  if (!clicked) {
-    const body = await getVisibleText(page);
-    throw new Error(`Could not find/click Team Schedule. Current page text starts with:\n${body.slice(0, 800)}`);
+  for (let attempt = 1; attempt <= launchAttempts; attempt += 1) {
+    workFeaturesPage = await restoreWorkFeaturesPage(workFeaturesPage, context);
+    console.log(`Looking for Team Schedule tile/button: ${text} (launch attempt ${attempt}/${launchAttempts})`);
+
+    const popupPromise = workFeaturesPage.waitForEvent('popup', { timeout: 7000 }).catch(() => null);
+    const clicked = await clickButtonLike(workFeaturesPage, [new RegExp(`Go to\\s+${text}`, 'i'), new RegExp(text, 'i')], 1500);
+    if (!clicked) {
+      const body = await getVisibleText(workFeaturesPage);
+      throw new Error(`Could not find/click Team Schedule. Current page text starts with:\n${body.slice(0, 800)}`);
+    }
+
+    const popup = await popupPromise;
+    let schedulePage = popup || workFeaturesPage;
+    if (popup) {
+      console.log('Team Schedule opened a new tab/window. Switching to it.');
+    }
+
+    await schedulePage.waitForLoadState('domcontentloaded', { timeout: 90_000 }).catch(() => {});
+    await schedulePage.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
+    schedulePage = await recoverOpenPage(context, schedulePage, 'ADP Team Schedule navigation');
+    await schedulePage.waitForTimeout(5000);
+
+    if (!(await pageShowsForbidden(schedulePage))) {
+      return schedulePage;
+    }
+
+    console.warn(`UKG/Kronos returned 403 Forbidden on Team Schedule launch attempt ${attempt}/${launchAttempts}`);
+    if (popup && !popup.isClosed()) {
+      await popup.close().catch(() => {});
+    }
+
+    if (attempt < launchAttempts) {
+      const delayMs = launchRetryDelayMs * attempt;
+      console.log(`Waiting ${delayMs}ms before relaunching Team Schedule from ADP`);
+      await workFeaturesPage.waitForTimeout(delayMs);
+    }
   }
 
-  const popup = await popupPromise;
-  if (popup) {
-    console.log('Team Schedule opened a new tab/window. Switching to it.');
-    page = popup;
-  }
-
-  await page.waitForLoadState('domcontentloaded', { timeout: 90_000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 30_000 }).catch(() => {});
-  page = await recoverOpenPage(context, page, 'ADP Team Schedule navigation');
-  await page.waitForTimeout(5000);
-  return page;
+  throw new Error(`UKG/Kronos returned 403 Forbidden after ${launchAttempts} Team Schedule launch attempts`);
 }
 
 
