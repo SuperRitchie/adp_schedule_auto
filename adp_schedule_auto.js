@@ -2227,7 +2227,7 @@ function runParser(htmlPaths, outDir) {
       ...inputFiles,
       '--out-dir', outDir,
       '--timezone', env('CALENDAR_TIMEZONE', 'America/Vancouver'),
-      '--calendar-location', env('CALENDAR_LOCATION', ''),
+      '--calendar-location', env('CALENDAR_LOCATION', '111 E 2nd Ave, Vancouver, BC V5T 1B4'),
       '--alarms', env('CALENDAR_ALARMS', '1440,180,60'),
       '--refresh-minutes', env('CALENDAR_REFRESH_MINUTES', '60')
     ];

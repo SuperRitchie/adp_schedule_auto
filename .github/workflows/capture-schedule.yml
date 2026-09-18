@@ -266,6 +266,18 @@ jobs:
             fi
           done
 
+      - name: Restore saved shift history from Google Drive
+        env:
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          GOOGLE_DRIVE_CREDENTIALS_JSON_B64: ${{ secrets.GOOGLE_DRIVE_CREDENTIALS_JSON_B64 }}
+          GOOGLE_DRIVE_TOKEN_JSON_B64: ${{ secrets.GOOGLE_DRIVE_TOKEN_JSON_B64 }}
+          GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64: ${{ secrets.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON_B64 }}
+        run: |
+          python3 scripts/upload_to_drive.py \
+            --restore-history \
+            --source-dir parsed_schedule \
+            --folder-id "$GOOGLE_DRIVE_FOLDER_ID"
+
       - name: Parse merged schedule outputs
         env:
           CALENDAR_TIMEZONE: America/Vancouver
@@ -283,7 +295,7 @@ jobs:
           python3 team_schedule_parser.py "${html_files[@]}" \
             --out-dir parsed_schedule \
             --timezone "$CALENDAR_TIMEZONE" \
-            --calendar-location "" \
+            --calendar-location "111 E 2nd Ave, Vancouver, BC V5T 1B4" \
             --alarms "$CALENDAR_ALARMS" \
             --refresh-minutes "$CALENDAR_REFRESH_MINUTES"
 

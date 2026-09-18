@@ -29,6 +29,8 @@ from typing import Iterable
 
 from bs4 import BeautifulSoup, Tag
 
+MEC_LOCATION = "111 E 2nd Ave, Vancouver, BC V5T 1B4"
+
 DATE_RANGE_RE = re.compile(
     r"(?P<sm>\d{1,2})/(?P<sd>\d{1,2})/(?P<sy>\d{4})\s*-\s*"
     r"(?P<em>\d{1,2})/(?P<ed>\d{1,2})/(?P<ey>\d{4})"
@@ -530,6 +532,38 @@ def dedupe_records(records: list[ShiftRecord]) -> list[ShiftRecord]:
     return list(by_key.values())
 
 
+def merge_shift_history(records: list[ShiftRecord], summaries: list[dict], history_path: Path) -> list[ShiftRecord]:
+    # only complete captured weeks may replace previously saved shifts
+    if not summaries:
+        raise ValueError("Cannot update shift history without captured date ranges")
+    ranges = []
+    for summary in summaries:
+        expected = summary.get("expected_employee_count_from_header")
+        rendered = summary.get("rendered_employee_count_in_saved_html", 0)
+        if summary.get("warning") or not expected or rendered < expected:
+            raise ValueError("Incomplete employee capture; saved shift history was not changed")
+        start = date.fromisoformat(summary["week_start"])
+        end = date.fromisoformat(summary["week_end"])
+        if (end - start).days != 6:
+            raise ValueError("Expected a complete seven-day schedule range")
+        ranges.append((start, end))
+
+    previous = []
+    if history_path.exists():
+        payload = json.loads(history_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            raise ValueError("Saved shift history must be a JSON list")
+        previous = [ShiftRecord(**item) for item in payload]
+    retained = [
+        rec for rec in previous
+        if not any(start <= date.fromisoformat(rec.date) <= end for start, end in ranges)
+    ]
+    if any(not any(start <= date.fromisoformat(rec.date) <= end for start, end in ranges) for rec in records):
+        raise ValueError("Captured shift falls outside the supplied date ranges")
+    merged = dedupe_records(retained + records)
+    return sorted(merged, key=lambda rec: (rec.employee_name.lower(), rec.start_datetime, rec.end_datetime, rec.shift_id))
+
+
 def group_by_employee(records: list[ShiftRecord]) -> list[dict]:
     grouped: dict[str, dict] = {}
     for rec in records:
@@ -614,6 +648,7 @@ def ics_refresh_duration(minutes: int) -> str:
 
 
 def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minutes: list[int], refresh_minutes: int = 60) -> str:
+    location = clean_text(location) or MEC_LOCATION
     generated_at = datetime.now(timezone.utc)
     now = generated_at.strftime('%Y%m%dT%H%M%SZ')
     sequence = int(generated_at.timestamp())
@@ -636,6 +671,8 @@ def build_employee_ics(employee: dict, *, tzid: str, location: str, alarm_minute
     for shift in employee['shifts']:
         uid_key = f"{shift.get('employee_slug')}:{shift.get('date')}:{shift.get('start_time')}:{shift.get('end_time')}:{shift.get('shift_id')}"
         summary = clean_text(shift.get('shift_title')) or 'Work Shift'
+        if not re.match(r'^MEC(?:\s|$)', summary, re.IGNORECASE):
+            summary = f'MEC {summary}'
         description_parts = []
         if shift.get('shift_segments'):
             description_parts.extend([
@@ -696,6 +733,20 @@ def write_employee_calendars(employees: list[dict], out_dir: Path, *, tzid: str,
 
 
 def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Path, *, tzid: str, location: str, alarm_minutes: list[int], refresh_minutes: int = 60) -> None:
+    current_records = records
+    records = merge_shift_history(records, summaries, out_dir / "shifts.json")
+    previous_index_path = out_dir / "calendar_index.json"
+    previous_index = json.loads(previous_index_path.read_text(encoding="utf-8")) if previous_index_path.exists() else []
+    if not isinstance(previous_index, list):
+        raise ValueError("Saved calendar index must be a JSON list")
+    employees = group_by_employee(records)
+    known_slugs = {employee["employee_slug"] for employee in employees}
+    for employee in previous_index:
+        if employee["employee_slug"] not in known_slugs:
+            employees.append({**employee, "shifts": []})
+            known_slugs.add(employee["employee_slug"])
+    employees.sort(key=lambda employee: employee["employee_name"].lower())
+    location = clean_text(location) or MEC_LOCATION
     out_dir.mkdir(parents=True, exist_ok=True)
     records_as_dicts = [asdict(rec) for rec in records]
 
@@ -709,7 +760,6 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
         json.dumps(records_as_dicts, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    employees = group_by_employee(records)
     (out_dir / "employees.json").write_text(
         json.dumps(employees, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -722,15 +772,18 @@ def write_outputs(records: list[ShiftRecord], summaries: list[dict], out_dir: Pa
 
     combined_summary = {
         "input_files": summaries,
-        "total_shift_count": len(records),
-        "total_employee_count_with_shifts": len({rec.employee_slug for rec in records}),
+        "total_shift_count": len(current_records),
+        "retained_shift_count": len(records) - len(current_records),
+        "stored_shift_count": len(records),
+        "total_employee_count_with_shifts": len({rec.employee_slug for rec in current_records}),
+        "stored_employee_count_with_shifts": len({rec.employee_slug for rec in records}),
         "calendar_time_zone": tzid,
         "calendar_location": location,
         "calendar_alarm_minutes_before_shift": alarm_minutes,
         "calendar_refresh_minutes": refresh_minutes,
-        "shifts_with_detail_count": sum(1 for rec in records if rec.shift_detail),
-        "shifts_missing_detail_count": sum(1 for rec in records if not rec.shift_detail),
-        "shifts_with_clean_segments_count": sum(1 for rec in records if rec.shift_segments),
+        "shifts_with_detail_count": sum(1 for rec in current_records if rec.shift_detail),
+        "shifts_missing_detail_count": sum(1 for rec in current_records if not rec.shift_detail),
+        "shifts_with_clean_segments_count": sum(1 for rec in current_records if rec.shift_segments),
         "output_files": ["shifts.csv", "shifts.json", "employees.json", "calendar_index.json", "calendars/*.ics", "parse_summary.json"],
     }
     (out_dir / "parse_summary.json").write_text(
@@ -744,7 +797,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("html_files", nargs="+", type=Path, help="One or more saved Team Schedule HTML files.")
     parser.add_argument("--out-dir", type=Path, default=Path("parsed_schedule"), help="Output directory.")
     parser.add_argument("--timezone", default="America/Vancouver", help="TZID for generated .ics calendars.")
-    parser.add_argument("--calendar-location", default="", help="Optional LOCATION value for generated .ics events.")
+    parser.add_argument("--calendar-location", default=MEC_LOCATION, help="LOCATION for events; blank values use the MEC store address")
     parser.add_argument("--alarms", default="1440,180,60", help="Comma-separated reminder minutes before shifts, e.g. 1440,180,60. Use empty string for no alarms.")
     parser.add_argument("--refresh-minutes", default="60", help="Requested refresh interval for subscribed calendars. Default: 60 minutes.")
     return parser.parse_args()

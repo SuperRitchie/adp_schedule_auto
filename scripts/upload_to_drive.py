@@ -25,6 +25,7 @@ import argparse
 import base64
 import binascii
 import json
+import io
 import mimetypes
 import os
 from dataclasses import asdict, dataclass
@@ -36,7 +37,7 @@ from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
 FOLDER_MIME_TYPE = "application/vnd.google-apps.folder"
@@ -90,6 +91,10 @@ def parse_args() -> argparse.Namespace:
         "--manifest-name",
         default="drive_upload_manifest.json",
         help="Manifest filename written locally after upload. Use empty string to disable.",
+    )
+    parser.add_argument(
+        "--restore-history", action="store_true",
+        help="Download saved shifts and calendar index before parsing; upload nothing",
     )
     return parser.parse_args()
 
@@ -313,10 +318,35 @@ def upload_or_update_file(service, *, local_path: Path, source_dir: Path, root_f
     )
 
 
+def restore_history(service, source_dir: Path, folder_id: str) -> None:
+    # stage both downloads before replacing any local history
+    downloads = {}
+    for name in ("shifts.json", "calendar_index.json"):
+        existing = find_child(service, folder_id, name)
+        if existing is None:
+            raise RuntimeError(f"Missing saved {name} in Drive; refusing to reset history")
+        buffer = io.BytesIO()
+        request = service.files().get_media(fileId=existing["id"], supportsAllDrives=True)
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk(num_retries=3)
+        data = buffer.getvalue()
+        if not isinstance(json.loads(data.decode("utf-8")), list):
+            raise ValueError(f"Saved {name} must contain a JSON list")
+        downloads[name] = data
+    source_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in downloads.items():
+        temporary = source_dir / f".{name}.restore"
+        temporary.write_bytes(data)
+        temporary.replace(source_dir / name)
+        print(f"Restored {name} from Drive")
+
+
 def main() -> None:
     args = parse_args()
     source_dir = args.source_dir.resolve()
-    if not source_dir.exists():
+    if not source_dir.exists() and not args.restore_history:
         raise SystemExit(f"Source directory does not exist: {source_dir}")
 
     allowed_extensions = {
@@ -330,6 +360,10 @@ def main() -> None:
         oauth_token_file=args.oauth_token_file,
         service_account_file=args.service_account_file,
     )
+    if args.restore_history:
+        restore_history(service, source_dir, args.folder_id)
+        return
+
     uploaded: list[UploadedFile] = []
 
     try:
