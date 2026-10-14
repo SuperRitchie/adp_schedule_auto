@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import shutil
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -101,12 +102,51 @@ def render_cloudflare_headers() -> str:
 """
 
 
+def shift_end_times(path: Path) -> list[int]:
+    """read end times from the generated feeds without changing their contents"""
+    text = re.sub(r"\r?\n[ \t]", "", path.read_text(encoding="utf-8"))
+    ends = []
+    for line in text.splitlines():
+        if not line.startswith(("DTEND:", "DTEND;")):
+            continue
+        property_name, value = line.split(":", 1)
+        if value.endswith("Z"):
+            end = datetime.strptime(value, "%Y%m%dT%H%M%SZ").replace(tzinfo=ZoneInfo("UTC"))
+        else:
+            match = re.search(r"(?:^|;)TZID=([^;]+)", property_name)
+            zone = ZoneInfo(match.group(1).strip('"') if match else "America/Vancouver")
+            end = datetime.strptime(value, "%Y%m%dT%H%M%S").replace(tzinfo=zone)
+        ends.append(int(end.timestamp() * 1000))
+    return ends
+
+
+def upcoming_count_html(item: dict) -> str:
+    ends = item.get("shift_end_times", [])
+    count = sum(end > datetime.now().timestamp() * 1000 for end in ends)
+    return f'<span data-shift-ends="{esc(json.dumps(ends))}">{count}</span>'
+
+
+def upcoming_count_script() -> str:
+    return """<script>
+function updateUpcomingCounts() {
+  const now = Date.now();
+  document.querySelectorAll('[data-shift-ends]').forEach(element => {
+    const ends = JSON.parse(element.dataset.shiftEnds);
+    element.textContent = ends.filter(end => end > now).length;
+  });
+}
+updateUpcomingCounts();
+setInterval(updateUpcomingCounts, 60000);
+document.addEventListener('visibilitychange', updateUpcomingCounts);
+</script>"""
+
+
 def render_home_page(entries: list[dict], base_url: str, generated_at: str, parse_summary: dict) -> str:
     rows = []
     for item in entries:
         name = esc(item["employee_name"])
         slug = esc(item["employee_slug"])
-        shift_count = esc(item.get("shift_count", 0))
+        shift_count = upcoming_count_html(item)
         https_url = esc(item["https_url"])
         webcal = esc(item["webcal_url"])
         page_url = f"u/{slug}/"
@@ -169,9 +209,10 @@ def render_home_page(entries: list[dict], base_url: str, generated_at: str, pars
   <label for="search"><strong>Search employee calendars</strong></label><br>
   <input id="search" type="search" placeholder="Type a name or slug..." autocomplete="off">
 
+  <p class="muted">Upcoming counts include shifts in progress and exclude shifts that have ended</p>
   <table id="calendar-table">
     <thead>
-      <tr><th>Name</th><th>Slug</th><th>Shifts</th><th>Subscribe</th><th>Outlook</th><th>ICS URL</th></tr>
+      <tr><th>Name</th><th>Slug</th><th>Upcoming shifts</th><th>Subscribe</th><th>Outlook</th><th>ICS URL</th></tr>
     </thead>
     <tbody>
       {''.join(rows)}
@@ -188,6 +229,7 @@ input.addEventListener('input', () => {{
   }});
 }});
 </script>
+{upcoming_count_script()}
 </body>
 </html>
 """
@@ -221,6 +263,8 @@ def render_employee_page(item: dict, generated_at: str) -> str:
 <main>
   <p><a href="../../">← All calendars</a></p>
   <h1>{name}</h1>
+  <p><strong>Upcoming shifts: {upcoming_count_html(item)}</strong></p>
+  <p class="muted">Includes shifts in progress and excludes shifts that have ended</p>
   <p class="muted">Calendar slug: <code>{slug}</code>. Generated {esc(generated_at)}.</p>
 
   <p>
@@ -256,6 +300,7 @@ async function copyIcsUrl() {{
   }}
 }}
 </script>
+{upcoming_count_script()}
 </body>
 </html>
 """
@@ -293,6 +338,10 @@ def build_site(source_dir: Path, out_dir: Path, base_url: str) -> None:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         item = dict(raw)
+        item["shift_end_times"] = shift_end_times(src)
+        item["upcoming_shift_count"] = sum(
+            end > datetime.now().timestamp() * 1000 for end in item["shift_end_times"]
+        )
         item["ics_file"] = dest_rel.as_posix()
         item["https_url"] = f"{base_url}/{dest_rel.as_posix()}"
         item["webcal_url"] = webcal_url(item["https_url"])
