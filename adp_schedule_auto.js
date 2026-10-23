@@ -19,6 +19,7 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const { chromium } = require('playwright');
 const dotenv = require('dotenv');
+const { validateCaptureDate, captureDayColumn } = require('./scripts/capture_scope');
 
 let google = null;
 
@@ -1211,10 +1212,10 @@ async function clickNextScheduleWeek(page) {
   throw new Error(`Clicked Next Week, but the date range did not change within ${timeoutMs}ms. Previous range: ${beforeRange || 'unknown'}`);
 }
 
-async function collectVirtualGridRows(page) {
+async function collectVirtualGridRows(page, captureDayCol = '') {
   console.log('Collecting all rendered schedule rows while scrolling the virtualized grid...');
 
-  const result = await page.evaluate(async ({ delayMs }) => {
+  const result = await page.evaluate(async ({ delayMs, captureDayCol }) => {
     const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
     const rows = new Map();
 
@@ -1274,7 +1275,7 @@ async function collectVirtualGridRows(page) {
           const shiftId = automationId.replace('location_schedule_cell_shift_', '') || `${dayCol}-${index}`;
           return { index, title, dayCol, automationId, shiftId };
         })
-        .filter(item => item.title);
+        .filter(item => item.title && (!captureDayCol || item.dayCol === captureDayCol));
     }
 
     function rowKey(row) {
@@ -1302,6 +1303,8 @@ async function collectVirtualGridRows(page) {
           rowIndex: row.getAttribute('row-index') || '',
           sortIndex: rowSortIndex(row),
           shiftCount: shifts.length,
+          captureDayCol,
+          captureDayPresent: !captureDayCol || Boolean(row.querySelector(`[col-id="${captureDayCol}"]`)),
           shifts,
           reason,
           html: row.outerHTML,
@@ -1461,7 +1464,11 @@ async function collectVirtualGridRows(page) {
       },
       scrollStats: visibleRowStats(),
     };
-  }, { delayMs: Number(env('ADP_SCROLL_DELAY_MS', '500')) });
+  }, { delayMs: Number(env('ADP_SCROLL_DELAY_MS', '500')), captureDayCol });
+
+  if (captureDayCol && result.rows.some(row => row.sortIndex >= 0 && row.name !== 'My Schedule' && !row.captureDayPresent)) {
+    throw new Error(`Some employee rows did not contain ${captureDayCol}; refusing an incomplete daily capture`);
+  }
 
   console.log(`Collected ${result.rowCount} rendered schedule rows${result.expectedEmployeeCount ? `; header expects ${result.expectedEmployeeCount}` : ''}${result.maxSortIndex !== undefined && result.maxSortIndex !== null ? `; max row-index ${result.maxSortIndex}` : ''}${result.scrollStats?.lastVisibleName ? `; last visible ${result.scrollStats.lastVisibleName}` : ''}.`);
   if (result.expectedEmployeeCount && !result.complete) {
@@ -1925,7 +1932,7 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
   const clickDelayMs = Number(env('ADP_SHIFT_DETAIL_CLICK_DELAY_MS', '150'));
   const rowTarget = await scrollToBaselineEmployeeRow(page, baselineRow, { allowBottomRetry: true });
 
-  const targetsResult = await page.evaluate(({ rowTargetId }) => {
+  const targetsResult = await page.evaluate(({ rowTargetId, captureDayCol }) => {
     function compactText(value) {
       return String(value || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
     }
@@ -1965,6 +1972,7 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
     const row = document.querySelector(`[data-adp-auto-row-target="${CSS.escape(rowTargetId)}"]`);
     if (!row) return { ok: false, error: 'row target not found' };
     const entities = Array.from(row.querySelectorAll('.location-schedule-cell__entity, [automation-id^="location_schedule_cell_shift_"]'))
+      .filter(entity => !captureDayCol || getDayCell(entity)?.getAttribute('col-id') === captureDayCol)
       .filter(isVisible)
       .sort((a, b) => {
         const aa = entityOrder(a);
@@ -1978,7 +1986,7 @@ async function captureVisibleBaselineRowDetails(page, baselineRow) {
       targets: entities.map(targetPayload),
       rowHtml: row.outerHTML,
     };
-  }, { rowTargetId: rowTarget.targetId });
+  }, { rowTargetId: rowTarget.targetId, captureDayCol: baselineRow.captureDayCol || '' });
 
   if (!targetsResult.ok) {
     return { ok: false, employeeName: baselineRow.name, primaryJob: baselineRow.primaryJob, error: targetsResult.error, records: [], misses: [], rowHtml: baselineRow.html };
@@ -2163,7 +2171,7 @@ function injectCapturedVirtualRows(html, virtualGridCapture) {
 
   const rowHtml = virtualGridCapture.rows.map(row => row.html).join('\n');
   const block = `
-<div id="adp-schedule-captured-virtual-rows" class="ag-center-cols-container" data-captured-row-count="${virtualGridCapture.rowCount}">
+<div id="adp-schedule-captured-virtual-rows" class="ag-center-cols-container" data-captured-row-count="${virtualGridCapture.rowCount}"${virtualGridCapture.captureDate ? ` data-adp-capture-date="${virtualGridCapture.captureDate}"` : ''}>
 ${rowHtml}
 </div>
 `;
@@ -2195,6 +2203,7 @@ async function saveCapture(page, outputDir, virtualGridCapture = null) {
 
   const metadata = {
     captured_at: new Date().toISOString(),
+    capture_date: virtualGridCapture?.captureDate || null,
     url: page.url(),
     title: await page.title().catch(() => ''),
     html_file: htmlPath,
@@ -2231,6 +2240,7 @@ function runParser(htmlPaths, outDir) {
       '--alarms', env('CALENDAR_ALARMS', '1440,180,60'),
       '--refresh-minutes', env('CALENDAR_REFRESH_MINUTES', '60')
     ];
+    if (env('ADP_CAPTURE_DATE')) args.push('--capture-date', env('ADP_CAPTURE_DATE'));
     console.log(`Running parser: ${python} ${args.map(a => JSON.stringify(a)).join(' ')}`);
     const child = spawn(python, args, { stdio: 'inherit', cwd: __dirname });
     child.on('close', code => {
@@ -2247,6 +2257,8 @@ async function main() {
   const profileDir = path.resolve(env('ADP_PROFILE_DIR', '.auth/adp-browser-profile'));
   const headless = boolEnv('ADP_HEADLESS', false);
   const incognito = boolEnv('ADP_INCOGNITO', true);
+  const captureTimezone = env('CALENDAR_TIMEZONE', 'America/Vancouver');
+  const captureDate = validateCaptureDate(env('ADP_CAPTURE_DATE'), captureTimezone);
 
   console.log('\nADP schedule auto capture');
   console.log('========================');
@@ -2321,8 +2333,9 @@ async function main() {
     page = await navigateToTeamSchedule(page, context);
 
     const weeksToCaptureRaw = Number.parseInt(env('ADP_WEEKS_TO_CAPTURE', '4'), 10);
-    const weeksToCapture = Number.isFinite(weeksToCaptureRaw) && weeksToCaptureRaw > 0 ? weeksToCaptureRaw : 4;
+    const weeksToCapture = captureDate ? 1 : (Number.isFinite(weeksToCaptureRaw) && weeksToCaptureRaw > 0 ? weeksToCaptureRaw : 4);
     const startWeekOffset = nonNegativeNumberEnv('ADP_START_WEEK_OFFSET', 0);
+    if (captureDate && startWeekOffset !== 0) throw new Error('Daily capture must use the current schedule week');
     const savedHtmlPaths = [];
     let latestSaved = null;
 
@@ -2341,10 +2354,17 @@ async function main() {
 
       const readiness = await validateScheduleCaptureReady(page);
       const currentRange = readiness.dateRange;
+      const captureDayCol = captureDayColumn(currentRange, captureDate);
+      validateCaptureDate(captureDate, captureTimezone);
+      if (captureDate) {
+        console.log(`Daily refresh: only ${captureDate} (${captureDayCol}) shift breakdowns will be opened`);
+        await page.locator(`.ag-header-cell[col-id="${captureDayCol}"]`).first().scrollIntoViewIfNeeded();
+      }
       console.log(`\nCapturing week ${weekIndex + 1}/${weeksToCapture}: ${currentRange}`);
       console.log(`Validated schedule page: ${readiness.employeeCount} employees, ${readiness.jobsLabel || 'jobs selected'}.`);
 
-      let virtualGridCapture = await collectVirtualGridRows(page);
+      let virtualGridCapture = await collectVirtualGridRows(page, captureDayCol);
+      virtualGridCapture.captureDate = captureDate;
       if (virtualGridCapture.expectedEmployeeCount < Number(env('ADP_MIN_EXPECTED_EMPLOYEES', '20'))) {
         throw new Error(`Baseline capture returned an implausible employee count (${virtualGridCapture.expectedEmployeeCount}) for ${currentRange}. This attempt will be retried from a fresh browser session.`);
       }
@@ -2358,6 +2378,7 @@ async function main() {
         virtualGridCapture = await captureShiftBreakdownsFromBaseline(page, virtualGridCapture);
       }
 
+      validateCaptureDate(captureDate, captureTimezone);
       latestSaved = await saveCapture(page, outputDir, virtualGridCapture);
       savedHtmlPaths.push(latestSaved.htmlPath);
 

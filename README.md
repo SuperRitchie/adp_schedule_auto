@@ -194,6 +194,26 @@ base64 -i service-account.json | pbcopy
 
 Paste the copied value into the GitHub secret.
 
+### Morning refresh for today's shifts
+
+`Refresh today's ADP shifts` starts at 6:17 am Vancouver time each day and holds its runner until 8:15 am before logging in to ADP
+
+It scans all employees but opens shift breakdowns only in today's column, using the displayed week to identify the correct column
+
+The workflow restores the saved history from Drive and replaces only today's date, including additions, edits and cancellations, then uploads the merged calendars and publishes the website
+
+Every other date stays in the saved history, including past shifts of former employees
+
+The daily and full workflows share the `adp-schedule-capture` concurrency group so they cannot overwrite each other's history at the same time
+
+GitHub may delay scheduled starts or queue the job behind an active capture, so 8:15 am is the earliest capture start rather than a guaranteed completion time
+
+To use 8:30 am instead, change `not_before` in `.github/workflows/refresh-today.yml` to `"08:30"`
+
+The original workflow keeps its two existing UTC schedules and full four-week capture, and no longer includes the extra 7:42 am Vancouver run
+
+Run the checks locally with `python3 -m unittest discover -s tests -v` and `node --test tests/test_capture_scope.js`
+
 ### Manual workflow run
 
 After committing and pushing the workflow file, go to the repo's **Actions** tab, select **Capture ADP schedule and upload to Google Drive**, then click **Run workflow**.

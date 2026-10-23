@@ -436,10 +436,17 @@ def iter_schedule_rows(soup: BeautifulSoup) -> Iterable[Tag]:
                 yield row
 
 
-def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
+def parse_team_schedule_html(path: Path, capture_date: date | None = None) -> tuple[list[ShiftRecord], dict]:
     html = path.read_text(encoding="utf-8", errors="ignore")
     soup = BeautifulSoup(html, "html.parser")
     start_date, end_date = parse_date_range(soup)
+
+    captured_grid = soup.select_one('#adp-schedule-captured-virtual-rows')
+    marked_date = captured_grid.get('data-adp-capture-date') if captured_grid else None
+    if marked_date and (capture_date is None or marked_date != capture_date.isoformat()):
+        raise ValueError("Daily capture requires a matching --capture-date; refusing to replace a full week")
+    if capture_date is not None and not start_date <= capture_date <= end_date:
+        raise ValueError("Requested capture date is outside the displayed schedule week")
 
     # Header usually displays the intended total, e.g. Name [122]. Saved HTML may include fewer
     # rendered rows because the web app virtualizes rows while scrolling.
@@ -453,6 +460,7 @@ def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
     records: list[ShiftRecord] = []
     rendered_employee_names: list[str] = []
     skipped_non_shift_entities = 0
+    employees_with_day_cell: set[str] = set()
 
     for row in iter_schedule_rows(soup):
         name_cell = row.select_one('[col-id="name"]')
@@ -466,10 +474,13 @@ def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
         primary_job, primary_job_path = get_primary_job(row)
 
         for day_index in range(7):
+            if capture_date is not None and start_date + timedelta(days=day_index) != capture_date:
+                continue
             day_col = f"day-{day_index}"
             cell = row.select_one(f'[col-id="{day_col}"]')
             if not cell:
                 continue
+            employees_with_day_cell.add(employee_name)
 
             entities = cell.select(".location-schedule-cell__entity")
             parsed = parse_shift_entities(
@@ -505,6 +516,12 @@ def parse_team_schedule_html(path: Path) -> tuple[list[ShiftRecord], dict]:
             "to capture everyone, scroll through the full grid before saving or use the app's export/print view if available."
         )
 
+    if capture_date is not None:
+        summary["capture_date"] = capture_date.isoformat()
+        summary["captured_day_employee_count"] = len(employees_with_day_cell)
+        if not expected_employee_count or len(employees_with_day_cell) < expected_employee_count:
+            summary["warning"] = "Daily capture did not include the target column for every employee"
+
     return records, summary
 
 
@@ -533,7 +550,7 @@ def dedupe_records(records: list[ShiftRecord]) -> list[ShiftRecord]:
 
 
 def merge_shift_history(records: list[ShiftRecord], summaries: list[dict], history_path: Path) -> list[ShiftRecord]:
-    # only complete captured weeks may replace previously saved shifts
+    # only complete captures may replace previously saved shifts in their declared dates
     if not summaries:
         raise ValueError("Cannot update shift history without captured date ranges")
     ranges = []
@@ -546,6 +563,13 @@ def merge_shift_history(records: list[ShiftRecord], summaries: list[dict], histo
         end = date.fromisoformat(summary["week_end"])
         if (end - start).days != 6:
             raise ValueError("Expected a complete seven-day schedule range")
+        if summary.get("capture_date"):
+            target = date.fromisoformat(summary["capture_date"])
+            if not start <= target <= end:
+                raise ValueError("Daily capture date is outside the displayed schedule week")
+            if summary.get("captured_day_employee_count", 0) < expected:
+                raise ValueError("Incomplete daily column; saved shift history was not changed")
+            start = end = target
         ranges.append((start, end))
 
     previous = []
@@ -800,6 +824,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--calendar-location", default=MEC_LOCATION, help="LOCATION for events; blank values use the MEC store address")
     parser.add_argument("--alarms", default="1440,180,60", help="Comma-separated reminder minutes before shifts, e.g. 1440,180,60. Use empty string for no alarms.")
     parser.add_argument("--refresh-minutes", default="60", help="Requested refresh interval for subscribed calendars. Default: 60 minutes.")
+    parser.add_argument("--capture-date", type=date.fromisoformat,
+                        help="Replace only this YYYY-MM-DD date while retaining all other saved shifts")
     return parser.parse_args()
 
 
@@ -809,7 +835,7 @@ def main() -> None:
     summaries: list[dict] = []
 
     for html_file in args.html_files:
-        records, summary = parse_team_schedule_html(html_file)
+        records, summary = parse_team_schedule_html(html_file, capture_date=args.capture_date)
         all_records.extend(records)
         summaries.append(summary)
 

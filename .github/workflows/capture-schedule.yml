@@ -2,6 +2,14 @@ name: Capture ADP schedule and upload to Google Drive
 
 on:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      capture_today:
+        type: boolean
+        default: false
+      not_before:
+        type: string
+        default: "08:15"
   repository_dispatch:
     types:
       - mec_schedule_posted
@@ -9,10 +17,6 @@ on:
     # existing schedules use utc
     - cron: "17 12 * * *" # 5:17 AM PDT / 4:17 AM PST
     - cron: "17 2 * * *" # 7:17 PM PDT / 6:17 PM PST
-    # average scheduled runtime: 1h 2m 54s across runs 242-266, excluding manual run 263
-    # target finish near 8:45 am vancouver time, subject to scheduling delays
-    - cron: "42 7 * * *"
-      timezone: America/Vancouver
 
 permissions:
   contents: read
@@ -64,6 +68,13 @@ jobs:
 
       - name: Install Python dependencies
         run: python3 -m pip install -r requirements.txt
+
+      - name: Wait for the morning daily refresh
+        if: inputs.capture_today
+        id: capture-time
+        env:
+          CAPTURE_NOT_BEFORE: ${{ inputs.not_before }}
+        run: python3 scripts/wait_for_daily_capture.py --not-before "$CAPTURE_NOT_BEFORE"
 
       - name: Write Gmail OAuth files from secrets
         env:
@@ -126,6 +137,7 @@ jobs:
 
       - name: Capture schedule weeks
         env:
+          ADP_CAPTURE_DATE: ${{ steps.capture-time.outputs.capture_date }}
           # Prefer the *_B64 secrets when present. The JS script decodes them
           # directly from process.env, so special characters never pass through
           # shell echo/heredoc dotenv generation.
@@ -195,7 +207,13 @@ jobs:
             rm -rf "${RUNNER_TEMP:-/tmp}"/adp-capture-week-* 2>/dev/null || true
           }
 
-          for ADP_START_WEEK_OFFSET in 0 1 2 3; do
+          week_offsets=(0 1 2 3)
+          if [ -n "$ADP_CAPTURE_DATE" ]; then
+            week_offsets=(0)
+            echo "Refreshing only $ADP_CAPTURE_DATE"
+          fi
+
+          for ADP_START_WEEK_OFFSET in "${week_offsets[@]}"; do
             export ADP_START_WEEK_OFFSET
             export OUTPUT_DIR="captures/week_${ADP_START_WEEK_OFFSET}"
             export PARSED_OUT_DIR="parsed_schedule_week_${ADP_START_WEEK_OFFSET}"
@@ -284,6 +302,7 @@ jobs:
 
       - name: Parse merged schedule outputs
         env:
+          ADP_CAPTURE_DATE: ${{ steps.capture-time.outputs.capture_date }}
           CALENDAR_TIMEZONE: America/Vancouver
           CALENDAR_ALARMS: 1440,180,60
           CALENDAR_REFRESH_MINUTES: "60"
@@ -292,8 +311,14 @@ jobs:
           mapfile -t html_files < <(find captures -path "captures/retry_failures" -prune -o -path "*/schedule_*.html" -type f -print | sort)
           printf 'Captured HTML files for final parse:\n'
           printf '  %s\n' "${html_files[@]}"
-          if [ "${#html_files[@]}" -ne 4 ]; then
-            echo "Expected exactly 4 captured week HTML files, got ${#html_files[@]}" >&2
+          expected_files=4
+          date_args=()
+          if [ -n "$ADP_CAPTURE_DATE" ]; then
+            expected_files=1
+            date_args=(--capture-date "$ADP_CAPTURE_DATE")
+          fi
+          if [ "${#html_files[@]}" -ne "$expected_files" ]; then
+            echo "Expected exactly $expected_files captured HTML files, got ${#html_files[@]}" >&2
             exit 1
           fi
           python3 team_schedule_parser.py "${html_files[@]}" \
@@ -301,15 +326,18 @@ jobs:
             --timezone "$CALENDAR_TIMEZONE" \
             --calendar-location "111 E 2nd Ave, Vancouver, BC V5T 1B4" \
             --alarms "$CALENDAR_ALARMS" \
-            --refresh-minutes "$CALENDAR_REFRESH_MINUTES"
+            --refresh-minutes "$CALENDAR_REFRESH_MINUTES" "${date_args[@]}"
 
       - name: Check full clean shift coverage
+        env:
+          ADP_CAPTURE_DATE: ${{ steps.capture-time.outputs.capture_date }}
         run: |
           set -euo pipefail
           find captures -name "*.metadata.json" -print -exec grep -n "captured_shift_detail_count" {} \;
           find captures -name "*.metadata.json" -print -exec grep -n "shift_detail_miss_count" {} \;
           python3 - <<'PY'
           import json
+          import os
           from pathlib import Path
 
           summary_path = Path("parsed_schedule/parse_summary.json")
@@ -325,7 +353,10 @@ jobs:
           print("shifts missing detail:", missing)
           print("shifts with clean segments:", with_clean_segments)
 
-          if total <= 0:
+          daily_date = os.environ.get("ADP_CAPTURE_DATE", "")
+          if daily_date and any(item.get("capture_date") != daily_date for item in summary["input_files"]):
+              raise SystemExit("daily refresh scope did not match the requested date")
+          if total <= 0 and not daily_date:
               raise SystemExit("no shifts were parsed")
           if missing != 0 or with_detail != total:
               raise SystemExit(
@@ -352,7 +383,7 @@ jobs:
           for item in clean_description_matches[:20]:
               print(item)
 
-          if not clean_description_matches:
+          if total > 0 and not clean_description_matches:
               raise SystemExit("no calendar descriptions contained cleaned Schedule text")
           if raw_breakdown_matches:
               print("raw Shift breakdown text remains in these files:")

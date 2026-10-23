@@ -91,6 +91,44 @@ class HistoryTests(unittest.TestCase):
             self.write([shift("2026-09-21")])
         self.assertEqual((self.out / "shifts.json").read_text(), "broken")
 
+    def test_daily_refresh_edits_adds_and_cancels_only_selected_date(self):
+        earlier = shift("2026-09-20", "former")
+        tomorrow = shift("2026-09-22")
+        future = shift("2026-10-10")
+        original = shift("2026-09-21")
+        canceled = shift("2026-09-21", "removed")
+        self.save_history([earlier, tomorrow, future, original, canceled])
+        daily = {**week(), "capture_date": "2026-09-21", "captured_day_employee_count": 2}
+        edited = replace(original, start_time="10:00 AM", start_datetime="2026-09-21T10:00:00")
+        added = shift("2026-09-21", "new")
+        self.write([edited, added], [daily])
+        saved = json.loads((self.out / "shifts.json").read_text())
+        self.assertCountEqual(saved, [asdict(r) for r in [earlier, tomorrow, future, edited, added]])
+        self.write([edited, added], [daily])
+        self.assertEqual(saved, json.loads((self.out / "shifts.json").read_text()))
+
+    def test_empty_daily_column_preserves_other_days_and_former_employee_feed(self):
+        old = shift("2026-09-13", "former")
+        self.save_history([old, shift("2026-09-21"), shift("2026-09-22")])
+        daily = {**week(), "capture_date": "2026-09-21", "captured_day_employee_count": 2}
+        self.write([], [daily])
+        saved = json.loads((self.out / "shifts.json").read_text())
+        self.assertEqual({item["date"] for item in saved}, {"2026-09-13", "2026-09-22"})
+        self.assertIn("BEGIN:VEVENT", (self.out / "calendars/former.ics").read_text())
+
+    def test_daily_scope_rejects_other_dates_and_incomplete_columns(self):
+        self.save_history([shift("2026-09-21")])
+        before = (self.out / "shifts.json").read_bytes()
+        daily = {**week(), "capture_date": "2026-09-21", "captured_day_employee_count": 2}
+        for records, summary in [
+            ([shift("2026-09-22")], daily),
+            ([], {**daily, "captured_day_employee_count": 1}),
+            ([], {**daily, "capture_date": "2026-10-10"}),
+        ]:
+            with self.subTest(summary=summary), self.assertRaises(ValueError):
+                self.write(records, [summary])
+            self.assertEqual(before, (self.out / "shifts.json").read_bytes())
+
     def test_titles_location_and_existing_uids(self):
         old = shift("2026-09-13", title="MEC Cash")
         self.save_history([old])

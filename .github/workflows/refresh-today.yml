@@ -1,0 +1,19 @@
+name: Refresh today's ADP shifts
+
+on:
+  workflow_dispatch:
+  schedule:
+    # reserve a runner early, then wait until 8:15 am before signing in
+    - cron: "17 6 * * *"
+      timezone: America/Vancouver
+
+permissions:
+  contents: read
+
+jobs:
+  refresh-today:
+    uses: ./.github/workflows/capture-schedule.yml
+    with:
+      capture_today: true
+      not_before: "08:15"
+    secrets: inherit
