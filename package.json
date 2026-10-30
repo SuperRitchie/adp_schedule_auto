@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "dotenv": "^18.0.0",
-    "googleapis": "^188.0.0",
+    "googleapis": "^189.0.0",
     "playwright": "^1.49.1"
   }
 }
